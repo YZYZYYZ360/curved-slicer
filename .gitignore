@@ -1,0 +1,8 @@
+build/
+build_*/
+runs/
+phase0_batch_test_output/
+*.user
+*.suo
+*.VC.db
+*.opendb

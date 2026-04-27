@@ -1,0 +1,130 @@
+# ================== config/batch_three_models.toml ==================
+# Phase 0 keeps the three-model batch local to this repository. The structure
+# follows NEW_PROJECT_ARCHITECTURE_v3 §4.1; Phase 1+ fields are parsed now and
+# consumed later.
+
+[io]
+output_root = "../runs/phase0"
+runs_csv    = "../runs/phase0/runs.csv"
+debug_dump_intermediates = false
+
+[[io.models]]
+name     = "armadillo_flat"
+stl_path = "../tests/models/armadillo_flat.stl"
+
+[[io.models]]
+name     = "bunny"
+stl_path = "../tests/models/bunny(46_35_45).stl"
+
+[[io.models]]
+name     = "mao"
+stl_path = "../tests/models/毛主席头雕(42_52_70).stl"
+
+[voxel]
+spacing_mm   = 5.0
+padding_mm   = 0.0
+sdf_band_mm  = 1.0
+
+[algorithm]
+mode = "field"
+
+[algorithm.wavefront]
+seed_strategy       = "bottom"
+isovalue_mode       = 0.5
+height_interval_mm  = 1.0
+serial_threshold    = 1000
+parallel_thread_num = 24
+
+[field.boundary]
+strategy              = "bottom_up"
+print_direction       = [0.0, 0.0, 1.0]
+bottom_dot_threshold  = -0.5
+bottom_sdf_band       = 1.0
+
+[algorithm.field.laplacian]
+max_iterations      = 2000
+tolerance           = 1e-6
+normalize_each_iter = false
+
+[algorithm.field.poisson]
+max_iterations   = 500
+tolerance        = 1e-6
+use_precondition = true
+
+[iso_surface]
+layer_thickness_mm = 0.8
+iso_spacing        = "uniform"
+max_layers         = 500
+phi_start_offset   = 0.0
+
+[path]
+strategy               = "scanline"
+line_spacing_mm        = 0.4
+contour_resample_mm    = 0.2
+smooth_position_window = 5
+
+[path.smooth_orientation]
+lambda_data   = 1.0
+lambda_smooth = 10.0
+
+[path.spline]
+enabled                = true
+resample_n_per_segment = 3
+tension                = 0.5
+
+[kuka.limits.a1]
+min_deg = -170.0
+max_deg =  170.0
+speed_deg_per_s = 336.0
+
+[kuka.limits.a2]
+min_deg = -195.0
+max_deg =   40.0
+speed_deg_per_s = 336.0
+
+[kuka.limits.a3]
+min_deg = -115.0
+max_deg =  150.0
+speed_deg_per_s = 488.0
+
+[kuka.limits.a4]
+min_deg = -185.0
+max_deg =  185.0
+speed_deg_per_s = 600.0
+
+[kuka.limits.a5]
+min_deg = -120.0
+max_deg =  120.0
+speed_deg_per_s = 529.0
+
+[kuka.limits.a6]
+min_deg = -350.0
+max_deg =  350.0
+speed_deg_per_s = 800.0
+
+[kuka.robot]
+status      = 4
+turn        = 28
+tool_no     = 8
+base_no     = 6
+platform_x  = 0.0
+platform_y  = 0.0
+platform_z  = 0.0
+z_offset    = 0.28
+robot_ini_abc = [0.0, 0.0, 0.0]
+
+[kuka.world_to_base]
+world_to_base = [
+  [1.0, 0.0, 0.0, 0.0],
+  [0.0, 1.0, 0.0, 0.0],
+  [0.0, 0.0, 1.0, 0.0],
+  [0.0, 0.0, 0.0, 1.0],
+]
+
+[metrics]
+enabled          = true
+sample_layer_ids = []
+output_per_layer = true
+
+[logging]
+level = "info"
