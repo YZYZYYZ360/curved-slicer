@@ -20,7 +20,6 @@ struct ModelReport {
     VoxelReport voxel;
     double read_ms = 0.0;
     double voxelize_ms = 0.0;
-    double wavefront_ms = 0.0;
     double iso_surface_ms = 0.0;
     std::size_t iso_vertices = 0;
     std::size_t iso_triangles = 0;

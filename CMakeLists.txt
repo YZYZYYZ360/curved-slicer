@@ -55,7 +55,6 @@ add_library(curved_slicer_phase0
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
     src/metrics/curvature.cpp
-    src/field/wavefront.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
 )
@@ -125,20 +124,6 @@ add_executable(sdf_smoke_test
 configure_phase0_test(sdf_smoke_test)
 
 add_test(NAME sdf_smoke COMMAND sdf_smoke_test)
-
-add_executable(wavefront_smoke_test
-    tests/wavefront_smoke_test.cpp
-)
-
-configure_phase0_test(wavefront_smoke_test)
-
-add_test(NAME wavefront_smoke COMMAND wavefront_smoke_test)
-
-add_executable(phase1_wavefront_batch_report
-    tests/phase1_wavefront_batch_report.cpp
-)
-
-configure_phase0_test(phase1_wavefront_batch_report)
 
 add_executable(phase0_io_voxel_benchmark
     tests/benchmarks/phase0_io_voxel_benchmark.cpp

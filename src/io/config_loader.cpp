@@ -309,16 +309,6 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDouble(voxel, "padding_mm", config.voxel.padding_mm);
     readDouble(voxel, "sdf_band_mm", config.voxel.sdf_band_mm);
 
-    const toml::table* algorithm = tableAt(root, {"algorithm"});
-    readString(algorithm, "mode", config.algorithm.mode);
-
-    const toml::table* wavefront = tableAt(root, {"algorithm", "wavefront"});
-    readString(wavefront, "seed_strategy", config.algorithm.wavefront.seed_strategy);
-    readDouble(wavefront, "isovalue_mode", config.algorithm.wavefront.isovalue_mode);
-    readDouble(wavefront, "height_interval_mm", config.algorithm.wavefront.height_interval_mm);
-    readInt(wavefront, "serial_threshold", config.algorithm.wavefront.serial_threshold);
-    readInt(wavefront, "parallel_thread_num", config.algorithm.wavefront.parallel_thread_num);
-
     const toml::table* boundary = tableAt(root, {"field", "boundary"});
     readString(boundary, "strategy", config.field_boundary.strategy);
     readDoubleArray3(boundary, "print_direction", config.field_boundary.print_direction);

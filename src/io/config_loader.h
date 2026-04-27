@@ -2,7 +2,6 @@
 
 #include "field/laplacian.h"
 #include "field/poisson.h"
-#include "field/wavefront.h"
 #include "geometry/voxel_grid.h"
 
 #include <array>
@@ -30,8 +29,6 @@ struct AlgorithmFieldConfig {
 };
 
 struct AlgorithmConfig {
-    std::string mode = "field";
-    WavefrontParams wavefront;
     AlgorithmFieldConfig field;
 };
 

@@ -35,9 +35,6 @@ int main()
         const std::filesystem::path config_path = sourceRoot() / "config" / "batch_three_models.toml";
         const cslc::PipelineConfig config = cslc::loadPipelineConfig(config_path);
 
-        if (config.algorithm.mode != "field") {
-            return fail("algorithm.mode should be field (v3 §4.1 default)");
-        }
         if (!nearlyEqual(config.kuka.limits[1].min_deg, -195.0)) {
             return fail("kuka.limits.a2.min_deg should be -195.0");
         }
@@ -50,9 +47,9 @@ int main()
         if (config.io.models[2].stl_path.u8string().find(u8"毛主席头雕") == std::string::npos) {
             return fail("Chinese model path should survive TOML parsing");
         }
-        if (!nearlyEqual(config.algorithm.wavefront.height_interval_mm, 1.0) ||
-            config.algorithm.wavefront.parallel_thread_num != 24) {
-            return fail("wavefront params should parse");
+        if (!nearlyEqual(config.algorithm.field.laplacian.tolerance, 1e-6) ||
+            config.algorithm.field.poisson.max_iterations != 500) {
+            return fail("algorithm.field params should parse");
         }
         if (!config.metrics.enabled || !config.metrics.output_per_layer) {
             return fail("metrics flags should parse");

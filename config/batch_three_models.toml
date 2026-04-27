@@ -25,16 +25,6 @@ spacing_mm   = 5.0
 padding_mm   = 0.0
 sdf_band_mm  = 1.0
 
-[algorithm]
-mode = "field"
-
-[algorithm.wavefront]
-seed_strategy       = "bottom"
-isovalue_mode       = 0.5
-height_interval_mm  = 1.0
-serial_threshold    = 1000
-parallel_thread_num = 24
-
 [field.boundary]
 strategy              = "bottom_up"
 print_direction       = [0.0, 0.0, 1.0]

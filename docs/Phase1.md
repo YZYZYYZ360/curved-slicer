@@ -115,3 +115,39 @@ runs/phase1_wavefront/mao/metrics.json
 
 - deferred to Phase 1.5 with reason: 尚未生成“老项目剥离补丁后版本”的 PLY，因此本轮只能确认新 baseline PLY 已落盘、M4 连通域为 1；新旧 PLY 肉眼对比截图尚缺老 baseline 参照。
 - deferred to Phase 1.5 with reason: `extractIsoSurface` 当前是 cube cell 上的 tetra decomposition 实现，并已复制老项目 `MCLookUp_Table.h`；若必须完全复刻老项目 topological Marching Cubes 表驱动版本，需要继续迁移 `MarchingCubes.cpp` 的 table/ambiguity 逻辑。
+
+---
+
+## 后置审阅与修订（2026-04-27，方案 C）
+
+Claude 对本阶段的实现做了二次审阅，发现 `src/field/wavefront.cpp` 名义上"迁移"老项目波前算法，**实际是 6-邻居 Dijkstra 测地距离重写**（51 条 SFF.cpp 注释全部是"X 已剥离 / X 改为 Y / X 收敛为 Y"的对照映射，没有一条是逐行复刻语义）。同时 `WavefrontParams` 多数字段（`isovalue_mode`、`height_interval_mm`、`serial_threshold`、`parallel_thread_num`）在实现里完全未被使用。
+
+经用户决策采用**方案 C**：基线由老项目可执行体（`tests/benchmarks/old_project/`）提供，新仓库不再维护 wavefront 模块。详细的架构修订见 `docs/architecture/V3_TO_V4_AMENDMENTS.md`。
+
+### 删除清单（已落地）
+
+- `src/field/wavefront.h`
+- `src/field/wavefront.cpp`
+- `tests/wavefront_smoke_test.cpp`
+- `tests/phase1_wavefront_batch_report.cpp`
+
+### 编辑清单（已落地）
+
+- `src/io/config_loader.h`：删除 `WavefrontParams` 引用、`algorithm.mode`、`algorithm.wavefront` 字段
+- `src/io/config_loader.cpp`：删除 `[algorithm] mode` 与 `[algorithm.wavefront]` 解析块
+- `src/app/pipeline.cpp`：删除 `if (mode == "wavefront")` 分支与 `toIsoExtractParams` / `writeMetricsJson` 辅助函数；保留 read + voxelize 主流程
+- `src/app/pipeline.h`：删除 `ModelReport::wavefront_ms` 字段
+- `config/batch_three_models.toml`：删除 `[algorithm]` 与 `[algorithm.wavefront]` 节
+- `tests/config_loader_unit_test.cpp`：用 `algorithm.field.laplacian.tolerance` / `algorithm.field.poisson.max_iterations` 断言替换原 wavefront 断言
+- `CMakeLists.txt`：从源列表删除 `wavefront.cpp`，删除 `wavefront_smoke_test` 与 `phase1_wavefront_batch_report` 目标
+
+### 保留项
+
+- `src/surface/mc_lookup_table.h`：迁移过来的 MC 查找表保留，**Phase 2 启动时把 `iso_surface.cpp` 从 tetra-decomposition 切换为表驱动 Marching Cubes**
+- `src/field/laplacian.h` / `src/field/poisson.h`：Phase 2 stub，保留接口设计
+- `src/geometry/bvh.{h,cpp}` / `src/geometry/voxel_grid` 的 sparse 存储改造：通用基础设施，Phase 2+ 受益
+- `runs/phase1_wavefront/` 下已落盘的 PLY 文件保持原样作为历史记录（不在 git 跟踪范围）
+
+### 后置 ctest 状态
+
+修订后预期 ctest 4/4 通过（原 5/5 中减去 wavefront_smoke）。**待 Codex 在 Phase 2 启动前重跑 ctest 确认**。
