@@ -62,18 +62,19 @@
 
 ## §4 方案 C 落地任务（Phase 2 启动前）
 
-老项目可执行体当前只输出体素化耗时与体素计数（见 `tests/benchmarks/old_project/old_project_phase0_benchmark.cpp`）。要做"论文基线"，必须扩展为：
+老项目可执行体当前只输出体素化耗时与体素计数（见 `tests/benchmarks/old_project/old_project_phase0_benchmark.cpp`）。要做"论文基线"，扩展为：
 
 | 输出物 | 现状 | Phase 2 启动前要做 |
 |---|---|---|
-| ScalarField (φ 场) | 老项目内部有，未导出 | 导出为简单二进制 / NumPy `.npy` 格式：`runs/phase1_old_baseline/<model>/phi.npy` |
-| 等值面 PLY | 老项目内部 `CuttingMeshwithMT` 产出，未独立导出 | 导出 `runs/phase1_old_baseline/<model>/iso_<layer>.ply`（至少导出中层一张做对比） |
-| metrics.json | 老项目无统一输出 | 输出与新项目同 schema：`{"model": ..., "M4": {"face_count": N, "connected_components": K}, "M6": {"solver_ms": ms}}` |
-| 中文路径支持 | 已通过（boost + UTF-8 walked） | 保留 |
+| ~~ScalarField (φ 场)~~ | ~~老项目内部有，未导出~~ | **取消**：M1/M4/M5/M6 全部基于 iso-surface mesh，不需要 φ 场原值。强行导出会要求暴露 `getDistanceFiled` 内部局部变量 `curvelayer_voxels`，违反"只读老项目"约束。 |
+| 各层等值面 STL | 老项目已支持 —— `SFF::getDistanceFiled` 调 `getMeshCurvelayer/getSingleMeshlayer`，二者在 `file_name` 非空时调 `buildLayerStlPath` 自动写盘到 `<file_name>/NNN.stl`（3 位零填充） | 直接消费这一已有机制：调用时传 `file_name = "runs/phase1_old_baseline/<model>"`，跑完后读取所有 `NNN.stl` 即可 |
+| metrics.json | 老项目无统一输出 | 在 benchmark cpp 内做后处理：用新项目 `readStl` 加载每张 STL，统计 `face_count` 与 `connected_components`，输出与新项目同 schema：`{"model": ..., "source": "old_project_baseline", "M4": {"face_count": N, "connected_components": K, "layer_count": L}, "M6": {"solver_ms": ms}}` |
+| 中层 PLY 对比文件 | 同上 | **取消独立导出**：直接用各层 STL 即可（MeshLab 原生支持）；如果论文真的需要 PLY，Phase 5 写一行 `scripts/stl_to_ply.py` 转换即可，不阻塞当前阶段 |
+| 中文路径支持 | 已通过（boost + UTF-8） | 保留 |
 
 新项目侧对应的对照器（Phase 2 末再实现，**不阻塞 Phase 2 算法开发**）：
-- `scripts/compare_baselines.py` 读两端 metrics.json 与 PLY，生成对比表 + 渲染对比图
-- `runs/comparison/<model>/`：side-by-side ply + 数值表
+- `scripts/compare_baselines.py` 读两端 metrics.json，生成对比表
+- `runs/comparison/<model>/`：side-by-side STL + 数值表
 
 ---
 
@@ -129,8 +130,10 @@ v3 §9 自检清单中**与 wavefront 相关**的条目：
 - [x] `config/batch_three_models.toml` 不再含 `[algorithm.wavefront]`、`[algorithm] mode`
 - [x] `tests/config_loader_unit_test.cpp` 不再断言 mode 或 wavefront 字段
 - [x] `CMakeLists.txt` 不再编译 `wavefront.cpp` / `wavefront_smoke_test` / `phase1_wavefront_batch_report`
-- [ ] 老项目 benchmark 扩展到输出 PLY + metrics.json（Phase 2 启动前完成）
+- [ ] 老项目 benchmark 调用 `getDistanceFiled` 触发逐层 STL 写盘 + benchmark 内做后处理生成 metrics.json（Phase 2 启动前完成）
 - [ ] `scripts/compare_baselines.py` 落地（Phase 2 末完成）
+
+**φ 场对比的取消理由**（v4 §4 表中已说明）：M1（max\|H\|）/ M4（面片数 + 连通域）/ M5（层厚 CV）/ M6（耗时）四项全部基于 iso-surface mesh。φ 场只是中间产物，不进论文表格。强行导出会要求修改老项目，得不偿失。
 
 v3 中**与 wavefront 无关**的所有条目（KUKA 非对称、batch 模式、generateBC 接口、Phase 0-5 路线图、子目录数 ≤ 7、依赖 ≤ 3、headers < 100 行、中文路径处理 等）继续生效。
 
