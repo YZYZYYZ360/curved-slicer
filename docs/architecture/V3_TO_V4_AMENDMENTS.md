@@ -1,8 +1,7 @@
 # 架构修订：v3 → v4 增补与废止
 
-> 修订日期：2026-04-27
-> 触发原因：Phase 1 实施审阅发现 `src/field/wavefront.cpp` 是 Dijkstra 重写而非老算法迁移；继续维护新仓库内的"基线"无意义。
-> 决定：采用**方案 C**——基线由老项目可执行体提供，新项目专注新算法。
+> 修订日期：2026-04-27（§1-§4），2026-04-27 二次修订（§5）
+> 触发原因：见各小节
 > 本文件不重写 v3 全文，仅记录相对 v3 的差异。v3 的所有未提及部分仍然有效。
 
 ---
@@ -38,6 +37,8 @@
 | §7 #2 "线程数启发式 在 wavefront 模块保留" | 改为"老项目里保留，新仓库不复用——方案 C 下不需要" |
 | §8 Phase 1 整节 | 重新定位（见下文 §3） |
 | §9 自检清单中 wavefront 相关项 | 替换为方案 C 相关项（见下文 §4） |
+| **§2.2 / §2.7 向量场 Laplacian + Poisson 接口** | **§5 修订**：Phase 2 改为标量 Laplacian 直接求 φ，废弃向量 G 与 Poisson 调用；向量 + Poisson 推迟到 Phase 3 与 KUKA 投影一起实现 |
+| **§8 Phase 2 / Phase 3 验收量化** | **§5.5 修订**：M4 口径从"per-layer cc=1"改为"per-model cc=1"；Phase 3 验收对比 Phase 2 标量结果 |
 
 ---
 
@@ -76,54 +77,6 @@
 - `scripts/compare_baselines.py` 读两端 metrics.json，生成对比表
 - `runs/comparison/<model>/`：side-by-side STL + 数值表
 
----
-
-## §5 修订后的全局架构（一览）
-
-```
-┌─────────────────────────────────┐
-│     curved-slicer (新仓库)       │
-│   只实现新算法（Plan-C 基线之外）   │
-│  ─────────────────────────────  │
-│   io / geometry / field /        │
-│   surface / metrics / path / app │
-│   field = Laplacian + Poisson    │
-│   + KUKA 投影                    │
-└─────────────────────────────────┘
-              │ 输出
-              ▼
-   runs/phase*_field/<model>/
-       phi.npy / iso_*.ply / metrics.json
-              │
-              ▼
-        ┌─────────────────┐
-        │ compare_baselines│
-        │   (Phase 2 末)   │
-        └─────────────────┘
-              ▲
-              │ 输出
-   runs/phase*_baseline/<model>/
-       phi.npy / iso_*.ply / metrics.json
-              ▲
-              │ 输出
-┌─────────────────────────────────┐
-│   旧项目可执行体（只读参考）        │
-│   tests/benchmarks/old_project/  │
-│   编译 SFF + OpenVDB             │
-│   = 论文基线                      │
-└─────────────────────────────────┘
-```
-
----
-
-## §6 与 v3 自检清单对应
-
-v3 §9 自检清单中**与 wavefront 相关**的条目：
-
-- ~~v3 §6 映射表与 Phase 1 矛盾解决：把 `SFF::getDistanceFiled` 拆成"纯波前"+ "补丁逻辑"两行~~ → **作废**：方案 C 下两者都废弃，不在新仓库迁移
-- ~~v3 §2.10 给出 `WavefrontParams` 与 `solveWavefront` 接口~~ → **作废**：模块已删除
-- ~~`[algorithm] mode` 切换~~ → **作废**：单一算法路径
-
 新增 v4 自检条目：
 
 - [x] 新仓库 src/ 全文不再含 `wavefront`、`WavefrontParams`、`algorithm.mode` 字符串
@@ -143,8 +96,146 @@ A1 实施过程中发现 `SFF::getDistanceFiled` 在 standalone benchmark（无 
 
 **φ 场对比的取消理由**（v4 §4 表中已说明）：M1（max\|H\|）/ M4（面片数 + 连通域）/ M5（层厚 CV）/ M6（耗时）四项全部基于 iso-surface mesh。φ 场只是中间产物，不进论文表格。强行导出会要求修改老项目，得不偿失。
 
-v3 中**与 wavefront 无关**的所有条目（KUKA 非对称、batch 模式、generateBC 接口、Phase 0-5 路线图、子目录数 ≤ 7、依赖 ≤ 3、headers < 100 行、中文路径处理 等）继续生效。
+---
+
+## §5 Phase 2 算法路径修订：标量 Laplacian（2026-04-27 二次修订）
+
+### §5.1 决策背景
+
+Codex 实施 v3 §2.2/§2.7 时实测发现严重问题：
+
+在均匀 Dirichlet BC（底面 G = `[0,0,1]`）+ 自由 Neumann 下，向量场 Laplacian `∇²G = 0` 的唯一解是常量 `G = [0,0,1]` 全空间。然后 `∇·G = 0`，Poisson 的 RHS 全 0，解 φ 退化为齐次解（按 anchor 钉到 0），等值面就是水平面切片——和"传统平面切片"无异。
+
+armadillo_flat spacing=0.5mm 实测 layer_count=55，per-layer connected_components 最高 5，正是水平切非凸模型的物理事实。
+
+**根因**：向量场 Laplacian + Poisson 流水线**只有在 KUKA 投影修改 G 之后**才有非平凡解。原 v3 §8 把 KUKA 投影排在 Phase 3 是设计漏洞——没有它 Phase 2 数学上就是恒等变换。
+
+### §5.2 Phase 2 算法重新定位
+
+| | 旧 Phase 2（v3） | 新 Phase 2（v4 §5） |
+|---|---|---|
+| 解什么 | 向量场 G（Laplacian），再用 G 求 φ（Poisson） | **标量场 φ 直接求**（标量 Laplacian） |
+| 方程 | `∇²G = 0`，`∇²φ = ∇·G` | `∇²φ = 0` |
+| BC | 底面 G = 单位 print_direction，侧/顶 Neumann | 底面 φ = 0，**顶面 φ = 1**，侧 Neumann |
+| 输出维度 | 3 分量向量场 | 1 分量标量场 |
+| 模块依赖 | laplacian + poisson | 仅 laplacian |
+| 等值面解释 | φ 等值面 = 切片层 | φ 等值面 = 切片层（同前） |
+
+这是 curved-layer slicing 文献中最常见的"engineering-simplified version"实现。无需 KUKA 投影即产出非平凡曲面层（标量 harmonic 场会自然贴合非凸几何，绕开悬垂区域）。
+
+### §5.3 Phase 3 重新定位
+
+**旧 Phase 3**：向 Phase 2 的向量 Laplacian 输出注入 KUKA projection。
+**新 Phase 3**：实现完整向量 Laplacian + KUKA projection + Poisson 流水线，作为 Phase 2 标量版本的**升级版**。
+
+论文叙事的好处：Phase 2 (scalar baseline) vs Phase 3 (vector + KUKA) 形成**算法内生对照**。比"老项目 vs 新项目"对比更可控、更说得清楚算法贡献。
+
+### §5.4 v3 接口的具体修订
+
+#### §5.4.1 `field/laplacian.h`（v4）
+
+```cpp
+struct BCParams {
+    std::string strategy = "bottom_up";  // 仅 bottom_up；其他 throw
+    std::array<double, 3> print_direction{0.0, 0.0, 1.0};
+    double bottom_dot_threshold = -0.5;
+    double bottom_sdf_band = 1.0;
+};
+
+struct LaplacianBC {
+    std::vector<VoxelIndex> fixed_indices;
+    std::vector<double> fixed_values;     // ← 改为标量（v3 是 std::vector<Vec3>）
+};
+
+LaplacianBC generateBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params);
+//   bottom_up 策略：
+//     底面体素 φ = 0（局部表面法向 · print_direction < bottom_dot_threshold，
+//                      在 |SDF| < bottom_sdf_band * spacing 的 narrow band 内）
+//     顶面体素 φ = 1（局部表面法向 · print_direction > -bottom_dot_threshold，
+//                      在 narrow band 内）
+//   两端都钉死，避免常解
+
+struct LaplacianParams {
+    int max_iterations = 2000;
+    double tolerance = 1e-6;
+    // normalize_each_iter 字段 v4 删除（标量场不需要）
+};
+
+// 返回类型从 VectorField 改为 ScalarField
+ScalarField solveLaplacian(const VoxelGrid& grid, const LaplacianBC& bc, const LaplacianParams& params);
+//   求解 ∇²φ = 0，在 fixed_indices 上钉 fixed_values（Dirichlet），其余自由 Neumann
+```
+
+`VectorField` 类型保留在 laplacian.h 里**作为 Phase 3+ 的占位**——Phase 3 启动时再恢复 `solveLaplacianVector` 函数。Phase 2 只走标量分支。
+
+#### §5.4.2 `field/poisson.h`（v4）
+
+Phase 2 标量 Laplacian 不调用 Poisson。`field/poisson.h` 保留两件事：
+1. `struct ScalarField` 定义（laplacian.h 的返回类型也用它）
+2. `struct PoissonParams` + `solvePoisson` inline stub，throw `not_implemented`，Phase 3 实现
+
+#### §5.4.3 `surface/iso_surface.h`（不变）
+
+`planIsoLevels` / `extractIsoSurface` 接口和 v3 §2.8 完全一致，因为它们消费 `ScalarField`，标量 Laplacian / 向量 Laplacian + Poisson 哪条路径产出的都接受。
+
+#### §5.4.4 `pipeline.cpp` 流水线（v4 Phase 2）
+
+```
+read STL → voxelize → buildSDF → generateBC → solveLaplacian → planIsoLevels →
+extractIsoSurface（每层）→ 写 iso_NNN.stl → 计算 metrics → 写 metrics.json
+```
+
+相比 v3 设计**移除了**：solvePoisson 调用、向量场 G 中间产物（v3 流水线把 G 灌给 Poisson 的中间步骤）。
+
+`config_loader.h` 里的 `algorithm.field.poisson` 字段保留（toml 仍能解析），但 Phase 2 不读取。Phase 3 再消费。
+
+### §5.5 验收标准修正
+
+#### §5.5.1 M4（连通域）口径修正
+
+旧 M4：`connected_components_per_layer = 1`（**错**：armadillo 等非凸模型水平切就是 5-6 片，物理事实）。
+
+新 M4 双层定义：
+
+| 指标 | 定义 | Phase 2 阈值 | 用途 |
+|---|---|---|---|
+| **per-model connected_components** | 把所有层的等值面顶点集合作为单一三角网，计算连通域数 | = 模型本身的连通片数（armadillo_flat / bunny / mao 都是 1） | 硬阈值，必须达成 |
+| **max(per-layer cc)** | 各层连通域数的最大值 | 仅记录到 metrics.json，不作阈值 | 描述指标，用于论文 |
+
+per-model cc = 1 的物理意义：模型是单连通体，则它的所有等值面应共同构成一个连通的"分层壳"——每相邻两层至少在某个共享顶点连通（实际上是边连通）。如果 per-model cc > 1，意味着某层完全孤立，这是算法异常。
+
+#### §5.5.2 Phase 2 完整验收（v4）
+
+- 三模型 spacing=0.5mm 全跑完不崩
+- 总耗时 < 30 min（armadillo 实测 27s/单模型，三模型应在 5-10 min 范围）
+- layer_count >= 50（实测 armadillo 55）
+- **per-model connected_components = 1**（armadillo_flat / bunny / mao 全部）
+- **max(per-layer cc)** 记录到 metrics.json 但不作阈值
+- φ 场可视化（debug PLY）合理：从底面 0 平滑过渡到顶面 1，无 NaN/Inf/负值
+- ctest 全绿
+
+#### §5.5.3 Phase 3 量化验证（升级 v3 §8 Phase 3）
+
+Phase 3 实现完整向量 Laplacian + KUKA projection + Poisson 后，**与 Phase 2 标量结果对比**：
+
+- M1（max\|H\|）相对 Phase 2 下降 ≥ 30%（向量场 + KUKA 投影应能产生更平滑的层）
+- M2（最大悬垂角）严格在 KR 4 R600 可达范围（**所有层不可达点占比 = 0%**，硬阈值）
+- per-layer connected_components = 1（KUKA 投影后等值面应该是单片，因为受机器人姿态约束的 G 场会沿连通域方向流动；不再是 Phase 2 的"per-model cc=1"软口径）
+- 三模型 spacing=0.5mm Phase 2 已通过的 layer_count / face_count_total 不劣化超 15%
+
+### §5.6 Codex 已落地代码的回滚清单
+
+| 文件 | v3 实现 | v4 §5 处理 |
+|---|---|---|
+| `src/field/laplacian.h` | LaplacianBC.fixed_vectors (Vec3) + solveLaplacian → VectorField | 改 fixed_values (double) + 返回 ScalarField；删 normalize_each_iter |
+| `src/field/laplacian.cpp` | 三分量 Eigen 求解 | 单标量 Eigen 求解，BC 含底面+顶面 |
+| `src/field/poisson.h` | inline solvePoisson stub | 保留 stub（throw not_implemented），Phase 3 实现 |
+| `src/field/poisson.cpp` | Codex 已实现完整 Poisson | **删除该 .cpp**；poisson 实现 Phase 3 重做 |
+| `src/app/pipeline.cpp` | Laplacian → Poisson → 等值面 | 删 Poisson 调用；ScalarField 直接来自 solveLaplacian |
+| `tests/laplacian_smoke_test.cpp` | 验证向量 G 场 | 改为验证标量 φ 场（cube：底面 0、顶面 1、中段平滑递增） |
+| `tests/poisson_smoke_test.cpp` | 验证 Poisson | **删除**（Phase 3 重写） |
+| `src/app/pipeline.cpp` 内 ModelReport.poisson_ms | 已添加字段 | 保留字段（向后兼容），值始终 0 |
 
 ---
 
-*v4 修订是局部增量，不替代 v3。两份文件并存：v3 是"原始设计"，v4 是"实施中的现实修正"。*
+*v4 修订是局部增量，不替代 v3。v3 是"原始设计"，v4 是"实施中的现实修正"。§5 是相对 v3 的最深修订，因为它涉及算法路径变更，不只是工程妥协。*
