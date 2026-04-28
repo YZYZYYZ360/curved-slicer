@@ -20,10 +20,19 @@ struct ModelReport {
     VoxelReport voxel;
     double read_ms = 0.0;
     double voxelize_ms = 0.0;
+    double sdf_ms = 0.0;
+    double laplacian_ms = 0.0;
+    double poisson_ms = 0.0;
     double iso_surface_ms = 0.0;
+    double peak_rss_mb = 0.0;
     std::size_t iso_vertices = 0;
     std::size_t iso_triangles = 0;
     int connected_components = 0;
+    int max_layer_connected_components = 0;
+    int layer_count = 0;
+    std::size_t face_count_total = 0;
+    std::vector<std::size_t> face_count_per_layer;
+    std::vector<int> connected_components_per_layer;
     std::filesystem::path metrics_path;
 };
 

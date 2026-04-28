@@ -318,7 +318,6 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     const toml::table* laplacian = tableAt(root, {"algorithm", "field", "laplacian"});
     readInt(laplacian, "max_iterations", config.algorithm.field.laplacian.max_iterations);
     readDouble(laplacian, "tolerance", config.algorithm.field.laplacian.tolerance);
-    readBool(laplacian, "normalize_each_iter", config.algorithm.field.laplacian.normalize_each_iter);
 
     const toml::table* poisson = tableAt(root, {"algorithm", "field", "poisson"});
     readInt(poisson, "max_iterations", config.algorithm.field.poisson.max_iterations);

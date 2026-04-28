@@ -1,13 +1,14 @@
 #pragma once
 
 #include "core/types.h"
-#include "field/laplacian.h"
 #include "geometry/voxel_grid.h"
 
 #include <stdexcept>
 #include <vector>
 
 namespace cslc {
+
+struct VectorField;
 
 struct PoissonParams {
     int max_iterations = 500;
@@ -27,7 +28,7 @@ struct ScalarField {
 
 inline ScalarField solvePoisson(const VoxelGrid&, const VectorField&, const PoissonParams&)
 {
-    throw std::logic_error("not_implemented: solvePoisson is deferred to Phase 2");
+    throw std::runtime_error("not implemented until Phase 3");
 }
 
 }  // namespace cslc

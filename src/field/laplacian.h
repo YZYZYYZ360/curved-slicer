@@ -1,22 +1,30 @@
 #pragma once
 
 #include "core/types.h"
-#include "geometry/voxel_grid.h"
+#include "field/poisson.h"
+#include "geometry/sdf.h"
 
-#include <stdexcept>
+#include <array>
+#include <string>
 #include <vector>
 
 namespace cslc {
 
+struct BCParams {
+    std::string strategy = "bottom_up";
+    std::array<double, 3> print_direction{0.0, 0.0, 1.0};
+    double bottom_dot_threshold = -0.5;
+    double bottom_sdf_band = 1.0;
+};
+
 struct LaplacianBC {
     std::vector<VoxelIndex> fixed_indices;
-    std::vector<Vec3> fixed_vectors;
+    std::vector<double> fixed_values;
 };
 
 struct LaplacianParams {
     int max_iterations = 2000;
     double tolerance = 1e-6;
-    bool normalize_each_iter = false;
 };
 
 struct VectorField {
@@ -28,14 +36,7 @@ struct VectorField {
     std::vector<Vec3> values;
 };
 
-inline LaplacianBC generateBC(const VoxelGrid&, const LaplacianBC&)
-{
-    throw std::logic_error("not_implemented: generateBC is deferred to Phase 2");
-}
-
-inline VectorField solveLaplacian(const VoxelGrid&, const LaplacianBC&, const LaplacianParams&)
-{
-    throw std::logic_error("not_implemented: solveLaplacian is deferred to Phase 2");
-}
+LaplacianBC generateBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params);
+ScalarField solveLaplacian(const VoxelGrid& grid, const LaplacianBC& bc, const LaplacianParams& params);
 
 }  // namespace cslc

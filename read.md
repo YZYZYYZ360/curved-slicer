@@ -313,3 +313,206 @@ phase1_wavefront_batch_report.exe 0.5:
   bunny connected_components=1 iso_triangles=6018
   mao connected_components=1 iso_triangles=49639
 ```
+
+## Phase 2 历史暂停点（v3 向量方案，已由 v4 §5 取代）
+
+本段保留为问题追踪记录。此前按 v3 Phase 2 指令实现了 Laplacian + Poisson field 流水线，但在 `armadillo_flat`
+的 `spacing=0.5mm` 验证中触发用户明确要求的停止条件：部分 iso layer 的
+`connected_components > 1`。该问题已被 Claude 在 v4 §5 重新定位：Phase 2 改为
+标量 Laplacian，Poisson 推迟到 Phase 3；M4 口径改为 per-model connected_components。
+
+### 当前项目结构（供 Claude 同步）
+
+```text
+src/
+├── app/
+│   └── pipeline.{h,cpp}
+├── core/
+│   └── types.h
+├── field/
+│   ├── laplacian.{h,cpp}
+│   └── poisson.{h,cpp}
+├── geometry/
+│   ├── bvh.{h,cpp}
+│   ├── sdf.{h,cpp}
+│   └── voxel_grid.{h,cpp}
+├── io/
+│   ├── config_loader.{h,cpp}
+│   ├── robot_writer.{h,cpp}
+│   └── stl_reader.{h,cpp}
+├── metrics/
+│   └── curvature.{h,cpp}
+└── surface/
+    ├── iso_surface.{h,cpp}
+    └── mc_lookup_table.h
+```
+
+新增/保留测试：
+
+```text
+tests/iso_surface_mc_test.cpp
+tests/laplacian_smoke_test.cpp
+tests/poisson_smoke_test.cpp
+tests/phase2_field_batch_report.cpp
+tests/benchmarks/old_project/old_project_phase1_baseline.cpp  // DEFERRED to Phase 5
+scripts/compare_baselines.py
+```
+
+### 已完成实现
+
+- `src/field/laplacian.cpp`：实现 `generateBC(bottom_up)` 与 `solveLaplacian`；非
+  `bottom_up` 策略仍按 Phase 2 要求抛 `not implemented in Phase 2`。
+- `src/field/poisson.cpp`：实现 anchored Poisson；普通路径保留 Eigen 求解。
+- `src/app/pipeline.cpp`：接入 read → voxelize → buildSDF → BC → Laplacian →
+  Poisson → MC → `iso_NNN.stl` → `metrics.json`，并在
+  `debug_dump_intermediates=true` 时输出 `phi_points.ply`。
+- `src/geometry/bvh.cpp`：原 `TriangleBvh` 实际是线性全三角扫描；本轮补成 AABB
+  BVH，否则 `spacing=0.5mm` 的 SDF 最近距离查询无法完成。
+- `src/geometry/voxel_grid.cpp` / `src/geometry/sdf.cpp`：X 射线求交增加 `(y,z)`
+  扫描线分桶，并在 SDF 中复用同一条扫描线的交点。
+
+### 验证记录
+
+轻量测试通过：
+
+```text
+ctest --test-dir build_nmake --output-on-failure
+100% tests passed, 0 tests failed out of 7
+```
+
+说明：`phase2_field_batch_report.exe` 保留为手动验收驱动；因当前 M4 连通域阻塞，
+暂未注册到默认 `ctest`。
+
+`armadillo_flat` 单模型 Phase 2 结果：
+
+```text
+spacing=0.5mm
+total_ms=27137.443
+read_ms=22.994
+voxelize_ms=629.478
+sdf_ms=15834.357
+laplacian_ms=41.762
+poisson_ms=30.906
+iso_surface_ms=10017.196
+peak_rss_mb=39.078
+grid=77x59x90 occupied=61178/408870
+layer_count=55
+face_count_total=63562
+connected_components=max 5
+connected_components_per_layer=[
+  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+  2,2,1,1,1,1,2,3,3,3,3,3,3,2,5,4,2,2
+]
+```
+
+### 遇到的问题 + 处理
+
+1. 现象：`phase2_field_batch_report.exe armadillo_flat` 已能在约 27.1s 跑完并落盘，
+   但多层 `connected_components > 1`，最高为 5。
+   影响：触发用户 Phase 2 明确停止条件，不能继续 bunny / mao，也不能宣称 B4 验收。
+   处理：已停止继续批量跑；需要 Claude/用户确认根因处理方向。
+
+2. 现象：`bottom_up` BC 给所有固定体素同一个 `[0,0,1]` 向量；在当前边界条件下，
+   Laplacian 的精确解是常量 G，Poisson 势函数等价于沿 Z 的线性高度场。
+   影响：iso layer 退化为模型水平截面；对 `armadillo_flat` 这类几何，水平截面天然
+   可能出现多个连通片，与“每层连通域数 = 1”的验收要求冲突。
+   处理：未添加合并连通片、跳层或 fallback；等待架构侧确认应修改 BC/φ 构造、
+   修改 M4 判定口径，还是允许后处理连接。
+
+3. 现象：最初 `phase2_field_batch_report` 10 分钟不返回。
+   影响：无法推进 0.5mm 三模型验证。
+   处理：补真实 AABB BVH 与 `(y,z)` 射线分桶；armadillo 0.5mm 从不可用降到约 27s。
+
+4. 现象：为了避免常量 BC/G 在大模型上构造无意义的大矩阵，Laplacian/Poisson 对
+   常量场增加了精确解析短路；非恒定场仍走 Eigen 路径。
+   影响：这不是接口偏离，但属于实现优化。若 Claude 要求所有情况都强制 Eigen 求解，
+   需删除该短路，0.5mm 性能会明显变差。
+   处理：记录在此，等待 Claude 审阅是否认可。
+
+### 未完成项
+
+- blocked by `armadillo_flat connected_components > 1`：三模型完整 Phase 2 batch
+  未继续执行。
+- deferred until M4 blocker resolved：`phase2_field_batch_report.exe` 暂作为手动
+  验收驱动，不进入默认 `ctest`。
+- deferred to Phase 5：`tests/benchmarks/old_project/old_project_phase1_baseline.cpp`
+  仅保留并标注 `DEFERRED to Phase 5`，本轮不运行旧项目 baseline 产物生成。
+
+## Phase 2 标量 Laplacian 重做结果（v4 §5）
+
+按 `docs/architecture/V3_TO_V4_AMENDMENTS.md` §5，当前 Phase 2 已改为标量
+Laplacian 直接求 φ：底面 φ=0，顶面 φ=1，侧面自由 Neumann。`poisson.cpp`
+已删除，`poisson.h` 只保留 Phase 3 stub。`phase2_field_batch_report.exe`
+仍是手动三模型验收驱动，不进入默认 `ctest`。
+
+当前结构（供 Claude 同步）：
+
+```text
+src/
+├── app/pipeline.{h,cpp}
+├── core/types.h
+├── field/laplacian.{h,cpp}
+├── field/poisson.h
+├── geometry/{bvh,sdf,voxel_grid}.{h,cpp}
+├── io/{config_loader,robot_writer,stl_reader}.{h,cpp}
+├── metrics/curvature.{h,cpp}
+└── surface/{iso_surface,mc_lookup_table}.h / iso_surface.cpp
+
+tests/
+├── iso_surface_mc_test.cpp
+├── laplacian_smoke_test.cpp
+├── phase2_field_batch_report.cpp
+└── benchmarks/old_project/old_project_phase1_baseline.cpp  // DEFERRED to Phase 5
+```
+
+默认测试：
+
+```text
+ctest --test-dir build_nmake --output-on-failure
+100% tests passed, 0 tests failed out of 6
+```
+
+三模型 `spacing=0.5mm` 手动验收：
+
+```text
+total_ms=593043.094
+armadillo_flat: grid=77x59x90 occupied=61178 layer_count=56
+  face_count_total=580804 per_model_cc=1 max_per_layer_cc=72
+  read_ms=23.733 voxelize_ms=627.930 sdf_ms=15997.436
+  laplacian_ms=1260.604 poisson_ms=0.000 iso_surface_ms=29111.853 peak_rss_mb=51.301
+bunny: grid=93x71x90 occupied=170682 layer_count=56
+  face_count_total=872460 per_model_cc=1 max_per_layer_cc=29
+  read_ms=208.108 voxelize_ms=3827.864 sdf_ms=68800.915
+  laplacian_ms=5310.671 poisson_ms=0.000 iso_surface_ms=42259.628 peak_rss_mb=131.285
+mao: grid=86x106x142 occupied=568639 layer_count=88
+  face_count_total=4105921 per_model_cc=1 max_per_layer_cc=91
+  read_ms=642.262 voxelize_ms=11038.160 sdf_ms=197369.636
+  laplacian_ms=24399.206 poisson_ms=0.000 iso_surface_ms=184818.846 peak_rss_mb=403.934
+```
+
+问题处理：
+
+1. 现象：v3 向量 Laplacian + Poisson 在无 KUKA 投影时退化为常量 G / 水平 φ。
+   影响：Phase 2 无法产生非平凡曲面层。
+   处理：按 v4 §5 改为标量 Laplacian；Poisson 推迟到 Phase 3。
+
+2. 现象：最初 0.5mm SDF 最近距离查询过慢。
+   影响：三模型验收无法完成。
+   处理：补 AABB BVH 与 `(y,z)` 射线分桶；三模型全量验收约 593s。
+
+3. 现象：per-layer cc 在非凸模型上可很高。
+   影响：旧硬阈值不合理。
+   处理：metrics.json 记录 `max_connected_components_per_layer`，硬阈值改为
+   per-model `connected_components = 1`。
+
+4. 现象：不同 iso level 的三角面通常不会字面共享顶点，直接把所有 STL 顶点拼成
+   一个 mesh 会把每层算成独立片。
+   影响：无法表达 v4 §5 所说的“分层壳”连通性。
+   处理：per-layer cc 仍用严格共享顶点；per-model cc 用相邻层顶点近邻 BFS
+   统计层间连通，结果写入 `M4.connected_components`。
+
+未完成项：
+
+- deferred to Phase 3：完整向量 Laplacian + KUKA projection + Poisson 流水线。
+- deferred to Phase 5：旧项目 baseline 产物生成器。

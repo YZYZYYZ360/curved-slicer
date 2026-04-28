@@ -32,12 +32,7 @@ struct AlgorithmConfig {
     AlgorithmFieldConfig field;
 };
 
-struct FieldBoundaryConfig {
-    std::string strategy = "bottom_up";
-    std::array<double, 3> print_direction{0.0, 0.0, 1.0};
-    double bottom_dot_threshold = -0.5;
-    double bottom_sdf_band = 1.0;
-};
+using FieldBoundaryConfig = BCParams;
 
 struct IsoSurfaceConfig {
     double layer_thickness_mm = 0.8;
@@ -85,21 +80,12 @@ struct RobotConfig {
 };
 
 struct KukaConfig {
-    std::array<JointAxisLimit, 6> limits{{
-        {-170.0, 170.0, 336.0},
-        {-195.0, 40.0, 336.0},
-        {-115.0, 150.0, 488.0},
-        {-185.0, 185.0, 600.0},
-        {-120.0, 120.0, 529.0},
-        {-350.0, 350.0, 800.0},
-    }};
+    std::array<JointAxisLimit, 6> limits{{{-170.0, 170.0, 336.0}, {-195.0, 40.0, 336.0},
+        {-115.0, 150.0, 488.0}, {-185.0, 185.0, 600.0}, {-120.0, 120.0, 529.0},
+        {-350.0, 350.0, 800.0}}};
     RobotConfig robot;
-    std::array<std::array<double, 4>, 4> world_to_base{{
-        {{1.0, 0.0, 0.0, 0.0}},
-        {{0.0, 1.0, 0.0, 0.0}},
-        {{0.0, 0.0, 1.0, 0.0}},
-        {{0.0, 0.0, 0.0, 1.0}},
-    }};
+    std::array<std::array<double, 4>, 4> world_to_base{{{{1.0, 0.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0, 0.0}}, {{0.0, 0.0, 0.0, 1.0}}}};
 };
 
 struct MetricsConfig {

@@ -27,5 +27,6 @@ std::vector<double> planIsoLevels(const ScalarField& phi, const IsoExtractParams
 IsoMesh extractIsoSurface(const ScalarField& phi, double iso_value, int layer_id);
 int countConnectedComponents(const IsoMesh& mesh);
 void writeIsoMeshPly(const IsoMesh& mesh, const std::filesystem::path& output_path);
+void writeIsoMeshStl(const IsoMesh& mesh, const std::filesystem::path& output_path);
 
 }  // namespace cslc

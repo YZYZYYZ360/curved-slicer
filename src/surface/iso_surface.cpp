@@ -1,5 +1,7 @@
 #include "surface/iso_surface.h"
 
+#include "surface/mc_lookup_table.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,22 +15,39 @@
 namespace cslc {
 namespace {
 
-constexpr std::array<std::array<int, 4>, 6> kTetrahedra{{
-    {{0, 5, 1, 6}},
-    {{0, 1, 2, 6}},
-    {{0, 2, 3, 6}},
-    {{0, 3, 7, 6}},
-    {{0, 7, 4, 6}},
-    {{0, 4, 5, 6}},
+constexpr std::array<std::array<int, 3>, 8> kCornerOffsets{{
+    {{0, 0, 0}},
+    {{1, 0, 0}},
+    {{1, 1, 0}},
+    {{0, 1, 0}},
+    {{0, 0, 1}},
+    {{1, 0, 1}},
+    {{1, 1, 1}},
+    {{0, 1, 1}},
 }};
 
-constexpr std::array<std::array<int, 2>, 6> kTetraEdges{{
+constexpr std::array<std::array<int, 2>, 12> kEdgeVertices{{
     {{0, 1}},
-    {{0, 2}},
-    {{0, 3}},
     {{1, 2}},
-    {{1, 3}},
     {{2, 3}},
+    {{0, 3}},
+    {{4, 5}},
+    {{5, 6}},
+    {{6, 7}},
+    {{4, 7}},
+    {{0, 4}},
+    {{1, 5}},
+    {{2, 6}},
+    {{3, 7}},
+}};
+
+constexpr std::array<std::array<int, 4>, 6> kFaceVertices{{
+    {{0, 1, 5, 4}},
+    {{1, 2, 6, 5}},
+    {{3, 2, 6, 7}},
+    {{0, 3, 7, 4}},
+    {{0, 1, 2, 3}},
+    {{4, 5, 6, 7}},
 }};
 
 std::size_t scalarIndex(const ScalarField& phi, int x, int y, int z)
@@ -95,31 +114,72 @@ void addTriangle(IsoMesh& mesh,
     mesh.triangles.push_back({ia, ib, ic});
 }
 
-void polygoniseTetra(IsoMesh& mesh,
-                     std::map<std::tuple<long long, long long, long long>, std::size_t>& vertex_lookup,
-                     const std::array<Vec3, 4>& points,
-                     const std::array<double, 4>& values,
-                     double iso)
+void addTriangleByIndex(IsoMesh& mesh, std::size_t a, std::size_t b, std::size_t c)
 {
-    std::vector<Vec3> intersections;
-    intersections.reserve(4);
+    if (a == b || b == c || a == c) {
+        return;
+    }
+    mesh.triangles.push_back({a, b, c});
+}
 
-    for (const auto& edge : kTetraEdges) {
-        const int a = edge[0];
-        const int b = edge[1];
-        const bool a_inside = values[a] <= iso;
-        const bool b_inside = values[b] <= iso;
-        if (a_inside == b_inside) {
-            continue;
-        }
-        intersections.push_back(interpolate(points[a], points[b], values[a], values[b], iso));
+bool faceTest(int face_value, const std::array<double, 8>& cube)
+{
+    const int face = std::abs(face_value) - 1;
+    const auto& vertices = kFaceVertices[static_cast<std::size_t>(face)];
+    const double s = cube[vertices[0]] * cube[vertices[2]] - cube[vertices[1]] * cube[vertices[3]];
+    return (((s > 0.0) == (face_value > 0)) == (cube[vertices[0]] > 0.0));
+}
+
+int interiorTest(int edge, const std::array<double, 8>& cube)
+{
+    const double aux1 = (cube[1] - cube[0]) * (cube[6] - cube[7]) -
+        (cube[5] - cube[4]) * (cube[2] - cube[3]);
+    if (std::abs(aux1) < 1e-12) {
+        return edge > 0 ? 1 : 0;
     }
 
-    if (intersections.size() == 3) {
-        addTriangle(mesh, vertex_lookup, intersections[0], intersections[1], intersections[2]);
-    } else if (intersections.size() == 4) {
-        addTriangle(mesh, vertex_lookup, intersections[0], intersections[1], intersections[2]);
-        addTriangle(mesh, vertex_lookup, intersections[0], intersections[2], intersections[3]);
+    const double aux2 = cube[0] * (cube[6] - cube[7]) -
+        cube[4] * (cube[2] - cube[3]) +
+        cube[7] * (cube[1] - cube[0]) -
+        cube[3] * (cube[5] - cube[4]);
+    const double s = -aux2 / (2.0 * aux1);
+    if (s < 0.0 || s > 1.0) {
+        return edge > 0 ? 1 : 0;
+    }
+
+    const double a = cube[0] + (cube[1] - cube[0]) * s;
+    const double b = cube[4] + (cube[5] - cube[4]) * s;
+    const double c = cube[7] + (cube[6] - cube[7]) * s;
+    const double d = cube[3] + (cube[2] - cube[3]) * s;
+
+    const int result = (a >= 0.0 ? 1 : 0) |
+        ((b >= 0.0 ? 1 : 0) << 1) |
+        ((c >= 0.0 ? 1 : 0) << 2) |
+        ((d >= 0.0 ? 1 : 0) << 3);
+
+    switch (result) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 6:
+    case 8:
+    case 9:
+    case 12:
+        return edge > 0 ? 1 : 0;
+    case 7:
+    case 11:
+    case 13:
+    case 14:
+    case 15:
+        return edge < 0 ? 1 : 0;
+    case 5:
+        return ((a * c < b * d) == (edge > 0)) ? 1 : 0;
+    case 10:
+        return ((a * c >= b * d) == (edge > 0)) ? 1 : 0;
+    default:
+        return 0;
     }
 }
 
@@ -173,33 +233,24 @@ IsoMesh extractIsoSurface(const ScalarField& phi, double iso_value, int layer_id
     mesh.layer_id = layer_id;
     std::map<std::tuple<long long, long long, long long>, std::size_t> vertex_lookup;
 
-    constexpr std::array<std::array<int, 3>, 8> corner_offsets{{
-        {{0, 0, 0}},
-        {{1, 0, 0}},
-        {{1, 1, 0}},
-        {{0, 1, 0}},
-        {{0, 0, 1}},
-        {{1, 0, 1}},
-        {{1, 1, 1}},
-        {{0, 1, 1}},
-    }};
-
     for (int z = 0; z + 1 < phi.nz; ++z) {
         for (int y = 0; y + 1 < phi.ny; ++y) {
             for (int x = 0; x + 1 < phi.nx; ++x) {
                 std::array<Vec3, 8> cube_points;
                 std::array<double, 8> cube_values;
+                std::array<double, 8> cube_signed;
                 bool has_finite = false;
                 bool has_below = false;
                 bool has_above = false;
 
-                for (std::size_t corner = 0; corner < corner_offsets.size(); ++corner) {
-                    const int cx = x + corner_offsets[corner][0];
-                    const int cy = y + corner_offsets[corner][1];
-                    const int cz = z + corner_offsets[corner][2];
+                for (std::size_t corner = 0; corner < kCornerOffsets.size(); ++corner) {
+                    const int cx = x + kCornerOffsets[corner][0];
+                    const int cy = y + kCornerOffsets[corner][1];
+                    const int cz = z + kCornerOffsets[corner][2];
                     const double value = phi.values[scalarIndex(phi, cx, cy, cz)];
                     cube_points[corner] = latticePoint(phi, cx, cy, cz);
                     cube_values[corner] = value;
+                    cube_signed[corner] = value - iso_value;
                     if (std::isfinite(value)) {
                         has_finite = true;
                         has_below = has_below || value <= iso_value;
@@ -211,18 +262,87 @@ IsoMesh extractIsoSurface(const ScalarField& phi, double iso_value, int layer_id
                     continue;
                 }
 
-                for (const auto& tetra : kTetrahedra) {
-                    std::array<Vec3, 4> tetra_points;
-                    std::array<double, 4> tetra_values;
-                    bool tetra_finite = true;
-                    for (std::size_t i = 0; i < tetra.size(); ++i) {
-                        tetra_points[i] = cube_points[tetra[i]];
-                        tetra_values[i] = cube_values[tetra[i]];
-                        tetra_finite = tetra_finite && std::isfinite(tetra_values[i]);
+                int raw_case = 0;
+                bool all_finite = true;
+                for (int corner = 0; corner < 8; ++corner) {
+                    all_finite = all_finite && std::isfinite(cube_values[static_cast<std::size_t>(corner)]);
+                    raw_case |= (cube_signed[static_cast<std::size_t>(corner)] > 0.0 ? 1 : 0) << corner;
+                }
+                if (!all_finite || raw_case == 0 || raw_case == 255) {
+                    continue;
+                }
+
+                const int case_number = marchingCubeSymmetries[raw_case][0];
+                if (case_number == 0) {
+                    continue;
+                }
+
+                int test_result = 0;
+                const int face_test_count = faceTest_num[raw_case][0];
+                for (int test_index = face_test_count; test_index > 0; --test_index) {
+                    const int face = faceTest_num[raw_case][test_index];
+                    test_result = (test_result << 1) | (faceTest(face, cube_signed) ? 1 : 0);
+                }
+                if (interiorTest_num[raw_case] != 0) {
+                    test_result |= interiorTest(interiorTest_num[raw_case], cube_signed) << face_test_count;
+                }
+
+                const int ambiguity_number = ambiguityTable[case_number][test_result];
+                if (ambiguity_number < 0 || triangleTable[raw_case] == nullptr) {
+                    continue;
+                }
+
+                unsigned char* table_entry = triangleTable[raw_case][ambiguity_number];
+                const int triangle_count = table_entry[0] / 3;
+                const bool has_center = table_entry[1] != 0;
+                const unsigned char* triangle_edges = table_entry + 2;
+
+                std::array<std::size_t, 13> vertex_indices;
+                vertex_indices.fill(std::numeric_limits<std::size_t>::max());
+                Vec3 center{};
+                int center_count = 0;
+
+                for (std::size_t edge = 0; edge < kEdgeVertices.size(); ++edge) {
+                    const int a = kEdgeVertices[edge][0];
+                    const int b = kEdgeVertices[edge][1];
+                    const double va = cube_values[static_cast<std::size_t>(a)];
+                    const double vb = cube_values[static_cast<std::size_t>(b)];
+                    const bool crosses = (cube_signed[static_cast<std::size_t>(a)] > 0.0) !=
+                        (cube_signed[static_cast<std::size_t>(b)] > 0.0);
+                    if (!crosses) {
+                        continue;
                     }
-                    if (tetra_finite) {
-                        polygoniseTetra(mesh, vertex_lookup, tetra_points, tetra_values, iso_value);
+                    const Vec3 point = interpolate(
+                        cube_points[static_cast<std::size_t>(a)],
+                        cube_points[static_cast<std::size_t>(b)],
+                        va,
+                        vb,
+                        iso_value);
+                    vertex_indices[edge] = addVertex(mesh, vertex_lookup, point);
+                    center = center + point;
+                    ++center_count;
+                }
+
+                if (has_center && center_count > 0) {
+                    vertex_indices[12] = addVertex(mesh, vertex_lookup, center * (1.0 / static_cast<double>(center_count)));
+                }
+
+                for (int tri = 0; tri < triangle_count; ++tri) {
+                    const unsigned char ea = triangle_edges[3 * tri];
+                    const unsigned char eb = triangle_edges[3 * tri + 1];
+                    const unsigned char ec = triangle_edges[3 * tri + 2];
+                    if (ea >= vertex_indices.size() || eb >= vertex_indices.size() || ec >= vertex_indices.size()) {
+                        continue;
                     }
+                    const std::size_t ia = vertex_indices[ea];
+                    const std::size_t ib = vertex_indices[eb];
+                    const std::size_t ic = vertex_indices[ec];
+                    if (ia == std::numeric_limits<std::size_t>::max() ||
+                        ib == std::numeric_limits<std::size_t>::max() ||
+                        ic == std::numeric_limits<std::size_t>::max()) {
+                        continue;
+                    }
+                    addTriangleByIndex(mesh, ia, ib, ic);
                 }
             }
         }
@@ -292,6 +412,31 @@ void writeIsoMeshPly(const IsoMesh& mesh, const std::filesystem::path& output_pa
     for (const Tri& tri : mesh.triangles) {
         output << "3 " << tri.v0 << ' ' << tri.v1 << ' ' << tri.v2 << '\n';
     }
+}
+
+void writeIsoMeshStl(const IsoMesh& mesh, const std::filesystem::path& output_path)
+{
+    std::filesystem::create_directories(output_path.parent_path());
+    std::ofstream output(output_path);
+    if (!output) {
+        throw std::runtime_error("Failed to open STL output: " + output_path.u8string());
+    }
+
+    output << "solid curved_slicer_iso_" << mesh.layer_id << '\n';
+    for (const Tri& tri : mesh.triangles) {
+        const Vec3& a = mesh.vertices[tri.v0];
+        const Vec3& b = mesh.vertices[tri.v1];
+        const Vec3& c = mesh.vertices[tri.v2];
+        const Vec3 normal = normalized(cross(b - a, c - a));
+        output << "  facet normal " << normal.x << ' ' << normal.y << ' ' << normal.z << '\n';
+        output << "    outer loop\n";
+        output << "      vertex " << a.x << ' ' << a.y << ' ' << a.z << '\n';
+        output << "      vertex " << b.x << ' ' << b.y << ' ' << b.z << '\n';
+        output << "      vertex " << c.x << ' ' << c.y << ' ' << c.z << '\n';
+        output << "    endloop\n";
+        output << "  endfacet\n";
+    }
+    output << "endsolid curved_slicer_iso_" << mesh.layer_id << '\n';
 }
 
 }  // namespace cslc

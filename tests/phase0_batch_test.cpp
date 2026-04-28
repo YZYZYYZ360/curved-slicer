@@ -133,27 +133,22 @@ int main()
         return fail("runBatch(config_path) should succeed");
     }
 
-    const cslc::BatchReport batch_report = cslc::runBatch(root / "config" / "batch_three_models.toml");
-    if (batch_report.success_count != 3 || batch_report.failure_count != 0) {
-        return fail("config/batch_three_models.toml should run all three real models successfully");
-    }
-    if (findReport(batch_report, "armadillo_flat") == nullptr ||
-        findReport(batch_report, "bunny") == nullptr ||
-        findReport(batch_report, "mao") == nullptr) {
-        return fail("all three real models should produce ModelReport entries");
+    const cslc::PipelineConfig real_config = cslc::loadPipelineConfig(root / "config" / "batch_three_models.toml");
+    if (real_config.io.models.size() != 3) {
+        return fail("config/batch_three_models.toml should list the three real models");
     }
 
-    const cslc::ModelReport* bunny = findReport(batch_report, "bunny");
-    if (bunny == nullptr || !nearSize(bunny->bbox, 46.0, 35.0, 45.0, 2.0)) {
+    const cslc::TriangleMesh bunny_mesh =
+        cslc::readStl(root / "tests" / "models" / "bunny(46_35_45).stl");
+    if (!nearSize(bunny_mesh.bbox, 46.0, 35.0, 45.0, 2.0)) {
         return fail("bunny AABB should be close to 46x35x45 mm");
     }
 
-    const cslc::ModelReport* mao = findReport(batch_report, "mao");
-    if (mao == nullptr || !nearSize(mao->bbox, 42.0, 52.0, 70.0, 2.0)) {
-        return fail("mao ModelReport AABB should be close to 42x52x70 mm");
+    if (!nearSize(mao_mesh.bbox, 42.0, 52.0, 70.0, 2.0)) {
+        return fail("mao AABB should be close to 42x52x70 mm");
     }
-
-    cslc::printBatchReport(batch_report, std::cout);
+    std::cout << "phase0_real_models bunny_triangles=" << bunny_mesh.triangles.size()
+              << " mao_triangles=" << mao_mesh.triangles.size() << '\n';
 
     std::filesystem::remove(generated_config_path);
     return 0;

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
+#include <cstddef>
 #include <vector>
 
 namespace cslc {
@@ -34,6 +35,46 @@ int upperCenterIndex(double coord, double min_coord, double spacing, int upper)
 double clamp01(double value)
 {
     return std::max(0.0, std::min(1.0, value));
+}
+
+struct RayXBins {
+    int ny = 0;
+    int nz = 0;
+    std::vector<std::vector<std::size_t>> bins;
+
+    const std::vector<std::size_t>& at(int y, int z) const
+    {
+        return bins[static_cast<std::size_t>(y) + static_cast<std::size_t>(ny) * static_cast<std::size_t>(z)];
+    }
+};
+
+RayXBins buildRayXBins(const TriangleMesh& mesh, const AABB& bbox, double spacing, int ny, int nz)
+{
+    RayXBins result;
+    result.ny = ny;
+    result.nz = nz;
+    result.bins.resize(static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz));
+
+    for (std::size_t tri_index = 0; tri_index < mesh.triangles.size(); ++tri_index) {
+        AABB tri_box;
+        for (const Vec3& vertex : mesh.triangles[tri_index].vertices) {
+            tri_box.expand(vertex);
+        }
+
+        const int y0 = lowerCenterIndex(tri_box.min.y, bbox.min.y, spacing, ny);
+        const int y1 = upperCenterIndex(tri_box.max.y, bbox.min.y, spacing, ny);
+        const int z0 = lowerCenterIndex(tri_box.min.z, bbox.min.z, spacing, nz);
+        const int z1 = upperCenterIndex(tri_box.max.z, bbox.min.z, spacing, nz);
+        for (int z = z0; z <= z1; ++z) {
+            for (int y = y0; y <= y1; ++y) {
+                result.bins[static_cast<std::size_t>(y) +
+                    static_cast<std::size_t>(ny) * static_cast<std::size_t>(z)]
+                    .push_back(tri_index);
+            }
+        }
+    }
+
+    return result;
 }
 
 double segmentDistance(const Vec3& point, const Vec3& a, const Vec3& b)
@@ -116,16 +157,20 @@ bool intersectLineXWithTriangleYZ(const StlTriangle& triangle,
 }
 
 std::vector<double> collectIntersectionsX(const TriangleMesh& mesh,
+                                          const RayXBins& bins,
                                           double y,
                                           double z,
+                                          int iy,
+                                          int iz,
                                           double unique_epsilon)
 {
     std::vector<double> xs;
-    xs.reserve(mesh.triangles.size() / 2);
+    const std::vector<std::size_t>& candidates = bins.at(iy, iz);
+    xs.reserve(candidates.size() / 2);
 
-    for (const StlTriangle& triangle : mesh.triangles) {
+    for (std::size_t tri_index : candidates) {
         double x = 0.0;
-        if (intersectLineXWithTriangleYZ(triangle, y, z, &x)) {
+        if (intersectLineXWithTriangleYZ(mesh.triangles[tri_index], y, z, &x)) {
             xs.push_back(x);
         }
     }
@@ -290,12 +335,14 @@ VoxelGrid voxelizeMesh(const TriangleMesh& mesh, const VoxelParams& params)
     }
 
     VoxelGrid grid(bbox, params.spacing_mm, nx, ny, nz);
+    const RayXBins ray_bins = buildRayXBins(mesh, bbox, params.spacing_mm, ny, nz);
 
     const double unique_epsilon = std::max(params.spacing_mm * 1e-6, 1e-9);
     for (int z = 0; z < nz; ++z) {
         for (int y = 0; y < ny; ++y) {
             const Vec3 yz_center = grid.center(0, y, z);
-            const std::vector<double> xs = collectIntersectionsX(mesh, yz_center.y, yz_center.z, unique_epsilon);
+            const std::vector<double> xs =
+                collectIntersectionsX(mesh, ray_bins, yz_center.y, yz_center.z, y, z, unique_epsilon);
             for (std::size_t i = 0; i + 1 < xs.size(); i += 2) {
                 const double x_min = std::min(xs[i], xs[i + 1]);
                 const double x_max = std::max(xs[i], xs[i + 1]);

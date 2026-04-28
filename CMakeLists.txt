@@ -54,6 +54,7 @@ add_library(curved_slicer_phase0
     src/geometry/voxel_grid.cpp
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
+    src/field/laplacian.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -67,7 +68,12 @@ target_include_directories(curved_slicer_phase0
 target_link_libraries(curved_slicer_phase0
     PRIVATE
         tomlplusplus::tomlplusplus
+        Eigen3::Eigen
 )
+
+if(WIN32)
+    target_link_libraries(curved_slicer_phase0 PUBLIC Psapi)
+endif()
 
 if(MSVC)
     target_compile_options(curved_slicer_phase0 PRIVATE /utf-8 /W4 /permissive-)
@@ -124,6 +130,30 @@ add_executable(sdf_smoke_test
 configure_phase0_test(sdf_smoke_test)
 
 add_test(NAME sdf_smoke COMMAND sdf_smoke_test)
+
+add_executable(iso_surface_mc_test
+    tests/iso_surface_mc_test.cpp
+)
+
+configure_phase0_test(iso_surface_mc_test)
+
+add_test(NAME iso_surface_mc_test COMMAND iso_surface_mc_test)
+
+add_executable(laplacian_smoke_test
+    tests/laplacian_smoke_test.cpp
+)
+
+configure_phase0_test(laplacian_smoke_test)
+
+add_test(NAME laplacian_smoke COMMAND laplacian_smoke_test)
+
+add_executable(phase2_field_batch_report
+    tests/phase2_field_batch_report.cpp
+)
+
+configure_phase0_test(phase2_field_batch_report)
+# Manual Phase 2 acceptance driver. It is intentionally not part of default
+# ctest because the three-model 0.5mm run is long-running.
 
 add_executable(phase0_io_voxel_benchmark
     tests/benchmarks/phase0_io_voxel_benchmark.cpp
