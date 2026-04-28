@@ -239,3 +239,148 @@ Phase 3 实现完整向量 Laplacian + KUKA projection + Poisson 后，**与 Pha
 ---
 
 *v4 修订是局部增量，不替代 v3。v3 是"原始设计"，v4 是"实施中的现实修正"。§5 是相对 v3 的最深修订，因为它涉及算法路径变更，不只是工程妥协。*
+
+---
+
+## §6 KUKA 投影路径重新定位：硬件实情 + MATLAB 委托（2026-04-27 三次修订）
+
+### §6.1 决策背景
+
+Phase 3 启动前用户更正了硬件配置——v3 §2.3 KUKA 投影设计基于错误假设。
+
+**实际硬件**（参照实验室照片 + 用户既有 MATLAB 工程 `C:\Users\26480\Desktop\机器人交接\后端机器人轨迹生成\程序\轨迹生成`）：
+- KUKA 6 轴机器人，**工件夹具+打印基板固定在机械臂法兰上**（动工件）
+- **挤出喷头固定在世界系上方**（不动喷头）
+- 已标定参数：
+  - 喷头世界坐标 `PTXYZ = [461.89, 5.64, 706.63] mm`（机器人 base 坐标系）
+  - 模型坐标系（model frame）原点在模型底部中心，与法兰坐标系（flange frame）的 Z 偏移 **12.00 mm**
+- DH 参数（来自 `mstraj0110.m`）：
+  - A1 [-170°, 170°], A2 [-40°, 195°], A3 [-205°, 60°], A4 [-185°, 185°], A5 [-120°, 120°]
+  - **注意**：A2/A3 范围与 v3 §2.3 表中的 KR 4 R600 规范有差异——以 MATLAB DH 为准（实际机器人或工件挂载导致的有效范围变化）
+
+v3 §2.3 设计的"逐体素 KUKA 可达性投影"在动工件场景下**不直接适用**：
+- 在动喷头场景下："TCP 必须到达 voxel 位置 + TCP +Z 必须等于 G" 是体素级局部约束
+- 在动工件场景下：约束是"工件旋转使 voxel 处的 G 与世界 +Z 对齐 + flange 必须把 voxel 移到 PTXYZ"——后者是位置约束，逐体素都不同；joint-space 路径连续性（相邻 voxel 间不能 180° 翻转）才是真正的硬约束
+- 完整 6 自由度 IK + joint-space 平滑已由 MATLAB 工程实现（`convert.m` 做 model→base 转换，`mstraj0110.m` 做 trajectory generation with `qlim`）
+
+### §6.2 Phase 3 KUKA-aware 简化
+
+**新策略**：C++ 项目**不做 IK，不做完整 KUKA 投影**。这部分委托给 MATLAB（已经是 working pipeline）。
+
+C++ Phase 3 的"KUKA-aware"简化为两件事：
+
+1. **Hemisphere clamp**：投影 G 场使每点的 G_z > ε（在工件 frame 内），物理意义是"打印方向不能指向工件下方（重力方向）"。这是动工件场景下唯一与 KUKA 几何相关的硬约束。
+2. **Smooth G via non-trivial BC**：让 Vector Laplacian 解非平凡：
+   - 底面 BC：G = +工件 Z（与平面打印基板对齐，所有底面体素同方向，因为基板是平的）
+   - 顶面 BC：G = local outward SDF normal（**与 v3 §2.3 不同**——顶面 BC 用局部曲面法向，所以 G 在不同 voxel 处不同，避免 §5.1 的均匀 BC 退化问题）
+   - 侧面：free Neumann
+
+这样 Phase 3 的算法变化**仍然有意义**：
+- Phase 2 标量：每层是 harmonic 函数等值面，仅靠 BC 不同（底=0、顶=1）创造非平凡解
+- Phase 3 向量：每点 G 是各向不同的方向，Poisson φ 是 G 的可积分代理。**non-uniform BC 是关键**，Hemisphere clamp 是收尾保证可印性
+
+### §6.3 v3 §2.3 接口的具体修订
+
+`field/kuka_projection.h` 的接口变化：
+
+```cpp
+// v3 §2.3 原版接口保留 KukaLimits / WorldToBase / isReachable / projectToReachableSet
+// v4 §6 不实现 isReachable（详细 IK 委托 MATLAB），projectToReachableSet 简化为 hemisphere clamp
+
+struct ReachabilityParams {
+    Vec3 workpiece_up{0.0, 0.0, 1.0};  // 工件本地 +Z 方向（即重力反方向当工件水平时）
+    double min_dot_threshold = 0.05;   // G · workpiece_up >= threshold 方为"可印"
+                                       // 0.05 ≈ 87° 偏离 workpiece +Z 仍允许，避免严格水平
+};
+
+VectorField projectToHemisphere(const VoxelGrid& grid,
+                                  const VectorField& G,
+                                  const ReachabilityParams& params);
+//   对每个 occupied voxel：
+//     若 G · workpiece_up < min_dot_threshold:
+//       G' = G - (G·workpiece_up - min_dot_threshold) * workpiece_up
+//       G' = normalize(G')
+//     否则保留 G
+//   即"把指向下半球的 G 旋转到 workpiece_up 附近的可印锥内"
+```
+
+**注意**：不在 C++ 实现 `isReachable`。joint-limit 检查由 MATLAB 在 IK 阶段做。
+
+### §6.4 Phase 3 接口最终态
+
+```cpp
+// field/laplacian.h（保留 Phase 2 标量版本 + 新增向量版本）
+struct LaplacianVectorBC {
+    std::vector<VoxelIndex> fixed_indices;
+    std::vector<Vec3> fixed_vectors;      // 单位向量
+};
+
+LaplacianVectorBC generateVectorBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params);
+//   bottom_up 策略：
+//     底面体素 G = +print_direction（默认 [0,0,1]，所有底面体素同向）
+//     顶面体素 G = local outward SDF normal（用 SDF 梯度算，归一化）
+//     ←—— 注意：顶面 G **变化**（每点不同），这是 §6.2 的关键
+//   筛选条件同 Phase 2 标量版本
+
+VectorField solveLaplacianVector(const VoxelGrid& grid, const LaplacianVectorBC& bc, const LaplacianParams& params);
+
+// field/kuka_projection.h 见 §6.3
+
+// field/poisson.h（恢复 Phase 2 删除的 .cpp，行为与 v3 §2.7 一致）
+ScalarField solvePoisson(const VoxelGrid& grid, const VectorField& G_projected, const PoissonParams& params);
+```
+
+### §6.5 Phase 3 流水线（pipeline.cpp 第 3 条分支）
+
+```cpp
+if (config.algorithm.pipeline == "vector_kuka") {
+    auto bc = generateVectorBC(grid, sdf, config.field_boundary);
+    auto G = solveLaplacianVector(grid, bc, config.algorithm.field.laplacian);
+    auto G_clamped = projectToHemisphere(grid, G, config.kuka.reachability);
+    auto phi = solvePoisson(grid, G_clamped, config.algorithm.field.poisson);
+    // 下游 planIsoLevels → MC → metrics 共用
+}
+```
+
+config 新增：
+```toml
+[kuka.reachability]
+workpiece_up = [0.0, 0.0, 1.0]
+min_dot_threshold = 0.05
+```
+
+### §6.6 Phase 3 验收标准（v4 §5.5.3 修正版）
+
+|  指标 | Phase 2 标量基线 | Phase 3 向量+hemisphere clamp 目标 |
+|---|---|---|
+| **per-model cc** | 1（已达成） | 1（保持） |
+| **per-layer cc max** | 72 / 29 / 91 | **下降 ≥ 50%**（向量 + 非均匀 BC 的算法贡献） |
+| **M1 max\|H\|** | 待计算 | **下降 ≥ 30%** vs Phase 2 |
+| **M2 hemisphere 违反点占比** | N/A | **= 0%**（hemisphere clamp 后所有 G 应满足约束） |
+| 总耗时 | 9.9 min | < 15 min（多了 Poisson 求解） |
+| layer_count / face_count | 56 / 56 / 88 等 | 不劣化超 15% |
+
+**关键**：per-layer cc 不再要求 = 1 硬阈值。armadillo 等非凸模型，4 腿在低 iso 区会自然分多片——这是几何事实，KUKA 投影改不了。Phase 3 要求是"**显著下降**"，证明算法有效。
+
+### §6.7 MATLAB 集成定位
+
+C++ Phase 3 输出**仍然是 STL + metrics.json + φ PLY**（与 Phase 2 同 schema）。MATLAB 集成是 **Phase 4 范围**：
+
+- Phase 4 增加 `path/path_generator` 模块：把每层 IsoMesh + φ 场转成 7 列 `(X, Y, Z, A, B, C, OnOff)` 路径文本
+- Phase 4 输出与 MATLAB `readText.m` 兼容的 layer files
+- 用户跑 MATLAB 的 `print0409.m` 验证（IK 不报错、joint 在 qlim 内）= Phase 4 验收
+
+这一段在 v3 §2.6 / §2.9 / §8 Phase 4 已有规划，v4 §6 仅明确"不在 C++ 做 IK"的边界。
+
+### §6.8 后续 3+2 轴中心送丝设备适配（暂不考虑）
+
+用户提及实验室未来会切到 3+2 轴中心送丝工艺。**Phase 5 之前不考虑**。届时主要影响：
+- Hardware kinematic：3 平移 + 2 旋转，比 6 自由度自由度更少
+- 中心送丝：喷头与工件相对位置约束更紧
+- 可能需要重写 `kuka_projection.h` → `kinematic_reachability.h`
+
+但这是 Phase 5+ 论文写作完成后的事，**当前架构不为它预留接口**（避免过度设计）。
+
+---
+
+*v4 §6 修订：从"逐体素 6 自由度 IK 投影"简化为"hemisphere clamp + 委托 MATLAB"。本质是把 v3 §2.3 中 60% 的复杂度移到 MATLAB（已实现），保留 C++ 中真正与曲面层算法相关的 40%（hemisphere 投影 + 非均匀 BC）。*
