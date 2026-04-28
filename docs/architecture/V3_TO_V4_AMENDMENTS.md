@@ -130,8 +130,16 @@ v3 §9 自检清单中**与 wavefront 相关**的条目：
 - [x] `config/batch_three_models.toml` 不再含 `[algorithm.wavefront]`、`[algorithm] mode`
 - [x] `tests/config_loader_unit_test.cpp` 不再断言 mode 或 wavefront 字段
 - [x] `CMakeLists.txt` 不再编译 `wavefront.cpp` / `wavefront_smoke_test` / `phase1_wavefront_batch_report`
-- [ ] 老项目 benchmark 调用 `getDistanceFiled` 触发逐层 STL 写盘 + benchmark 内做后处理生成 metrics.json（Phase 2 启动前完成）
-- [ ] `scripts/compare_baselines.py` 落地（Phase 2 末完成）
+- [ ] ~~老项目 benchmark 调用 `getDistanceFiled` 触发逐层 STL 写盘~~ → **推迟到 Phase 5**（见 v4 §4.1 baseline 备选方案）
+- [x] `scripts/compare_baselines.py` 框架已落地（自我对比验证通过；具体基线源 Phase 5 决定）
+
+### §4.1 baseline 备选方案（Phase 5 论文写作期决定）
+
+A1 实施过程中发现 `SFF::getDistanceFiled` 在 standalone benchmark（无 main_ui 上下文）下挂死，所有内部诊断走 `app_log::logf` 默认 `OutputDebugString` 路径，console 不可见，定位预估 1-3 天且可能要求修改老项目。Phase 2 算法主任务**不依赖**baseline，故 A1 推迟。Phase 5 写论文时三选一：
+
+- **(a) 平面切片基线（推荐）**：在已有的 OpenVDB SDF 上按 z 等距切等值面。`tests/benchmarks/old_project/` 现有代码已经把 SDF 拉起来了，只需加 50 行 MC 调用 + 后处理。论文叙事："vs traditional planar slicing"
+- **(b) 重启 A1**：花 1 天预算给 Codex 授权"老项目 SFF.cpp 里只加诊断 `printf` 不改逻辑"的有限修改权，定位 getDistanceFiled 卡点
+- **(c) GUI 手动**：跑老项目原生 main_ui.exe 三模型，手动收集 STL 输出。土法但有效
 
 **φ 场对比的取消理由**（v4 §4 表中已说明）：M1（max\|H\|）/ M4（面片数 + 连通域）/ M5（层厚 CV）/ M6（耗时）四项全部基于 iso-surface mesh。φ 场只是中间产物，不进论文表格。强行导出会要求修改老项目，得不偿失。
 
