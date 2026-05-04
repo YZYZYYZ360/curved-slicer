@@ -1,8 +1,10 @@
 #include "app/pipeline.h"
 
+#include "field/kuka_projection.h"
 #include "field/laplacian.h"
 #include "geometry/sdf.h"
 #include "geometry/voxel_grid.h"
+#include "metrics/curvature.h"
 #include "surface/iso_surface.h"
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -43,6 +46,20 @@ std::size_t scalarIndex(const ScalarField& phi, int x, int y, int z)
             (static_cast<std::size_t>(y) + static_cast<std::size_t>(phi.ny) * static_cast<std::size_t>(z));
 }
 
+std::size_t sdfIndex(const SDF& sdf, int x, int y, int z)
+{
+    return static_cast<std::size_t>(x) +
+        static_cast<std::size_t>(sdf.nx) *
+            (static_cast<std::size_t>(y) + static_cast<std::size_t>(sdf.ny) * static_cast<std::size_t>(z));
+}
+
+std::size_t vectorIndex(const VectorField& field, int x, int y, int z)
+{
+    return static_cast<std::size_t>(x) +
+        static_cast<std::size_t>(field.nx) *
+            (static_cast<std::size_t>(y) + static_cast<std::size_t>(field.ny) * static_cast<std::size_t>(z));
+}
+
 Vec3 scalarPoint(const ScalarField& phi, int x, int y, int z)
 {
     return {
@@ -65,6 +82,249 @@ double currentPeakRssMb()
     return 0.0;
 }
 
+double sdfValue(const SDF& sdf, int x, int y, int z)
+{
+    x = std::max(0, std::min(x, sdf.nx - 1));
+    y = std::max(0, std::min(y, sdf.ny - 1));
+    z = std::max(0, std::min(z, sdf.nz - 1));
+    return sdf.values[sdfIndex(sdf, x, y, z)];
+}
+
+Vec3 sdfGradient(const SDF& sdf, int x, int y, int z)
+{
+    const auto derivative = [&sdf](int x0, int y0, int z0, int axis) {
+        int minus_x = x0;
+        int minus_y = y0;
+        int minus_z = z0;
+        int plus_x = x0;
+        int plus_y = y0;
+        int plus_z = z0;
+        if (axis == 0) {
+            minus_x = std::max(0, x0 - 1);
+            plus_x = std::min(sdf.nx - 1, x0 + 1);
+        } else if (axis == 1) {
+            minus_y = std::max(0, y0 - 1);
+            plus_y = std::min(sdf.ny - 1, y0 + 1);
+        } else {
+            minus_z = std::max(0, z0 - 1);
+            plus_z = std::min(sdf.nz - 1, z0 + 1);
+        }
+
+        const int delta = std::abs(plus_x - minus_x) +
+            std::abs(plus_y - minus_y) +
+            std::abs(plus_z - minus_z);
+        if (delta == 0) {
+            return 0.0;
+        }
+        return (sdfValue(sdf, plus_x, plus_y, plus_z) -
+                sdfValue(sdf, minus_x, minus_y, minus_z)) /
+            (static_cast<double>(delta) * sdf.spacing);
+    };
+
+    return {derivative(x, y, z, 0), derivative(x, y, z, 1), derivative(x, y, z, 2)};
+}
+
+Vec3 printDirection(const BCParams& params)
+{
+    const Vec3 direction{
+        params.print_direction[0],
+        params.print_direction[1],
+        params.print_direction[2],
+    };
+    const Vec3 unit = normalized(direction);
+    if (norm(unit) == 0.0) {
+        throw std::runtime_error("field.boundary.print_direction must be non-zero");
+    }
+    return unit;
+}
+
+VoxelIndex chooseBottomAnchor(const VoxelGrid& grid, const SDF& sdf, const BCParams& params)
+{
+    const Vec3 direction = printDirection(params);
+    const double sdf_band = params.bottom_sdf_band * grid.spacing();
+    VoxelIndex best{0, 0, 0};
+    double best_score = -std::numeric_limits<double>::infinity();
+
+    for (const VoxelIndex& voxel : grid.occupiedVoxels()) {
+        if (std::abs(sdfValue(sdf, voxel.x, voxel.y, voxel.z)) > sdf_band) {
+            continue;
+        }
+        const Vec3 normal = normalized(sdfGradient(sdf, voxel.x, voxel.y, voxel.z));
+        if (norm(normal) == 0.0) {
+            continue;
+        }
+        const double alignment = dot(normal, direction);
+        if (alignment >= params.bottom_dot_threshold) {
+            continue;
+        }
+        const double score = -alignment;
+        if (score > best_score) {
+            best_score = score;
+            best = voxel;
+        }
+    }
+
+    if (best_score < 0.0) {
+        throw std::runtime_error("chooseBottomAnchor: no bottom voxel found");
+    }
+    return best;
+}
+
+struct PhiGaugeDiagnostics {
+    double min_pre_shift = 0.0;
+    double max_pre_shift = 0.0;
+    double range_pre_shift = 0.0;
+    double min_post_shift = 0.0;
+    double max_post_shift = 0.0;
+    double progression = 0.0;
+    double bbox_extent = 0.0;
+    VoxelIndex min_voxel{0, 0, 0};
+    VoxelIndex max_voxel{0, 0, 0};
+    Vec3 min_point;
+    Vec3 max_point;
+    double min_sdf = 0.0;
+    double max_sdf = 0.0;
+    double min_alignment = 0.0;
+    double max_alignment = 0.0;
+    bool min_on_bottom_boundary = false;
+    bool max_on_top_boundary = false;
+};
+
+PhiGaugeDiagnostics gaugeShiftPhi(ScalarField& phi,
+                                  const VoxelGrid& grid,
+                                  const SDF& sdf,
+                                  const BCParams& boundary)
+{
+    PhiGaugeDiagnostics diagnostics;
+    diagnostics.min_pre_shift = std::numeric_limits<double>::infinity();
+    diagnostics.max_pre_shift = -std::numeric_limits<double>::infinity();
+
+    for (int z = 0; z < phi.nz; ++z) {
+        for (int y = 0; y < phi.ny; ++y) {
+            for (int x = 0; x < phi.nx; ++x) {
+                const double value = phi.values[scalarIndex(phi, x, y, z)];
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                if (value < diagnostics.min_pre_shift) {
+                    diagnostics.min_pre_shift = value;
+                    diagnostics.min_voxel = {x, y, z};
+                }
+                if (value > diagnostics.max_pre_shift) {
+                    diagnostics.max_pre_shift = value;
+                    diagnostics.max_voxel = {x, y, z};
+                }
+            }
+        }
+    }
+
+    if (!std::isfinite(diagnostics.min_pre_shift) || !std::isfinite(diagnostics.max_pre_shift)) {
+        throw std::runtime_error("gaugeShiftPhi requires finite phi values");
+    }
+
+    diagnostics.min_point = scalarPoint(phi, diagnostics.min_voxel.x, diagnostics.min_voxel.y, diagnostics.min_voxel.z);
+    diagnostics.max_point = scalarPoint(phi, diagnostics.max_voxel.x, diagnostics.max_voxel.y, diagnostics.max_voxel.z);
+    const Vec3 direction = printDirection(boundary);
+    const auto sampleAlignment = [&sdf, &direction](const VoxelIndex& voxel) {
+        const Vec3 normal = normalized(sdfGradient(sdf, voxel.x, voxel.y, voxel.z));
+        return norm(normal) == 0.0 ? 0.0 : dot(normal, direction);
+    };
+    diagnostics.min_sdf = sdfValue(sdf, diagnostics.min_voxel.x, diagnostics.min_voxel.y, diagnostics.min_voxel.z);
+    diagnostics.max_sdf = sdfValue(sdf, diagnostics.max_voxel.x, diagnostics.max_voxel.y, diagnostics.max_voxel.z);
+    diagnostics.min_alignment = sampleAlignment(diagnostics.min_voxel);
+    diagnostics.max_alignment = sampleAlignment(diagnostics.max_voxel);
+
+    const double sdf_band = boundary.bottom_sdf_band * grid.spacing();
+    diagnostics.min_on_bottom_boundary =
+        std::abs(diagnostics.min_sdf) <= sdf_band &&
+        diagnostics.min_alignment < boundary.bottom_dot_threshold;
+    diagnostics.max_on_top_boundary =
+        std::abs(diagnostics.max_sdf) <= sdf_band &&
+        diagnostics.max_alignment > -boundary.bottom_dot_threshold;
+
+    const auto describeVoxel = [](const char* label,
+                                  const VoxelIndex& voxel,
+                                  const Vec3& point,
+                                  double sdf_sample,
+                                  double alignment) {
+        std::ostringstream message;
+        message << label << " voxel=(" << voxel.x << ',' << voxel.y << ',' << voxel.z << ")"
+                << " point=(" << point.x << ',' << point.y << ',' << point.z << ")"
+                << " sdf=" << sdf_sample
+                << " alignment=" << alignment;
+        return message.str();
+    };
+
+    const Vec3 size = phi.bbox.size();
+    diagnostics.bbox_extent = std::max(
+        1e-12,
+        std::abs(direction.x) * size.x + std::abs(direction.y) * size.y + std::abs(direction.z) * size.z);
+    diagnostics.progression = dot(diagnostics.max_point - diagnostics.min_point, direction);
+    diagnostics.range_pre_shift = diagnostics.max_pre_shift - diagnostics.min_pre_shift;
+
+    if (diagnostics.progression < 0.5 * diagnostics.bbox_extent) {
+        std::ostringstream message;
+        message << "phi_max not progressing along print_direction"
+                << " progression=" << diagnostics.progression
+                << " bbox_extent=" << diagnostics.bbox_extent << "; "
+                << describeVoxel("min", diagnostics.min_voxel, diagnostics.min_point,
+                                 diagnostics.min_sdf, diagnostics.min_alignment)
+                << "; "
+                << describeVoxel("max", diagnostics.max_voxel, diagnostics.max_point,
+                                 diagnostics.max_sdf, diagnostics.max_alignment);
+        throw std::runtime_error(message.str());
+    }
+    if (diagnostics.range_pre_shift < 0.3 * diagnostics.bbox_extent ||
+        diagnostics.range_pre_shift > 3.0 * diagnostics.bbox_extent) {
+        std::ostringstream message;
+        message << "phi_range implausible vs bbox_extent"
+                << " range=" << diagnostics.range_pre_shift
+                << " bbox_extent=" << diagnostics.bbox_extent;
+        throw std::runtime_error(message.str());
+    }
+    if (diagnostics.min_pre_shift < -0.10 * diagnostics.range_pre_shift) {
+        std::ostringstream message;
+        message << "phi negative drift > 10% of range"
+                << " min=" << diagnostics.min_pre_shift
+                << " range=" << diagnostics.range_pre_shift;
+        throw std::runtime_error(message.str());
+    }
+
+    for (double& value : phi.values) {
+        if (std::isfinite(value)) {
+            value -= diagnostics.min_pre_shift;
+        }
+    }
+
+    diagnostics.min_post_shift = 0.0;
+    diagnostics.max_post_shift = diagnostics.max_pre_shift - diagnostics.min_pre_shift;
+    return diagnostics;
+}
+
+double hemisphereViolationRatio(const VoxelGrid& grid,
+                                const VectorField& field,
+                                const ReachabilityParams& params)
+{
+    const Vec3 up = normalized(params.workpiece_up);
+    if (norm(up) == 0.0) {
+        throw std::runtime_error("reachability.workpiece_up must be non-zero");
+    }
+
+    std::size_t total = 0;
+    std::size_t violations = 0;
+    for (const VoxelIndex& voxel : grid.occupiedVoxels()) {
+        const Vec3 value = field.values[vectorIndex(field, voxel.x, voxel.y, voxel.z)];
+        if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z)) {
+            continue;
+        }
+        ++total;
+        if (dot(normalized(value), up) + 1e-9 < params.min_dot_threshold) {
+            ++violations;
+        }
+    }
+    return total == 0 ? 0.0 : static_cast<double>(violations) / static_cast<double>(total);
+}
+
 double projectedExtent(const AABB& bbox, const FieldBoundaryConfig& boundary)
 {
     const Vec3 direction = normalized({
@@ -78,11 +338,13 @@ double projectedExtent(const AABB& bbox, const FieldBoundaryConfig& boundary)
 
 IsoExtractParams isoParamsFromConfig(const IsoSurfaceConfig& config,
                                      const FieldBoundaryConfig& boundary,
-                                     const AABB& bbox)
+                                     const AABB& bbox,
+                                     bool phi_is_normalized)
 {
     IsoExtractParams params;
-    const double extent = projectedExtent(bbox, boundary);
-    params.layer_thickness_mm = extent > 0.0 ? config.layer_thickness_mm / extent : config.layer_thickness_mm;
+    const double extent = phi_is_normalized ? projectedExtent(bbox, boundary) : 0.0;
+    params.layer_thickness_mm =
+        extent > 0.0 ? config.layer_thickness_mm / extent : config.layer_thickness_mm;
     params.iso_spacing = config.iso_spacing;
     params.max_layers = config.max_layers;
     params.phi_start_offset = extent > 0.0 ? config.phi_start_offset / extent : config.phi_start_offset;
@@ -99,22 +361,27 @@ std::filesystem::path layerPath(const std::filesystem::path& model_dir, int laye
 void validatePhi(const ScalarField& phi)
 {
     double min_value = std::numeric_limits<double>::infinity();
+    double max_value = -std::numeric_limits<double>::infinity();
     bool has_value = false;
     for (double value : phi.values) {
         if (std::isinf(value)) {
-            throw std::runtime_error("Phase 2 phi field has infinite values");
+            throw std::runtime_error("phi field has infinite values");
         }
         if (std::isnan(value)) {
             continue;
         }
         has_value = true;
         min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
     }
     if (!has_value) {
-        throw std::runtime_error("Phase 2 phi field has no finite occupied values");
+        throw std::runtime_error("phi field has no finite occupied values");
     }
     if (min_value < -1e-8) {
-        throw std::runtime_error("Phase 2 phi field has negative values");
+        std::ostringstream message;
+        message << "phi field has negative values min=" << min_value
+                << " max=" << max_value;
+        throw std::runtime_error(message.str());
     }
 }
 
@@ -167,6 +434,14 @@ struct DisjointSet {
     }
 };
 
+struct ComponentNodeInfo {
+    std::size_t triangle_count = 0;
+    std::size_t vertex_count = 0;
+    AABB bbox;
+    int layer_min = std::numeric_limits<int>::max();
+    int layer_max = std::numeric_limits<int>::min();
+};
+
 std::vector<int> vertexComponents(const IsoMesh& mesh, int* component_count)
 {
     std::vector<std::vector<std::size_t>> vertex_to_triangles(mesh.vertices.size());
@@ -213,6 +488,21 @@ std::vector<int> vertexComponents(const IsoMesh& mesh, int* component_count)
     return vertex_component;
 }
 
+std::string formatComponentSummary(std::size_t index, const ComponentSummary& component)
+{
+    std::ostringstream output;
+    output << "component[" << index << "] root=" << component.root_id
+           << " vertices=" << component.vertex_count
+           << " triangles=" << component.triangle_count
+           << " bbox=[("
+           << component.bbox.min.x << ',' << component.bbox.min.y << ',' << component.bbox.min.z
+           << ")..("
+           << component.bbox.max.x << ',' << component.bbox.max.y << ',' << component.bbox.max.z
+           << ")] z=[" << component.bbox.min.z << ',' << component.bbox.max.z << ']'
+           << " layer=[" << component.layer_min << ',' << component.layer_max << ']';
+    return output.str();
+}
+
 using CellKey = std::tuple<long long, long long, long long>;
 
 CellKey cellKey(const Vec3& point, double cell_size)
@@ -224,7 +514,10 @@ CellKey cellKey(const Vec3& point, double cell_size)
     };
 }
 
-int countLayerShellComponents(const std::vector<IsoMesh>& layers, double connect_radius)
+int countLayerShellComponents(const std::vector<IsoMesh>& layers,
+                              double connect_radius,
+                              std::vector<ComponentSummary>* component_details,
+                              std::vector<std::string>* component_summary)
 {
     struct VertexRef {
         Vec3 point;
@@ -234,13 +527,26 @@ int countLayerShellComponents(const std::vector<IsoMesh>& layers, double connect
     DisjointSet sets;
     std::map<CellKey, std::vector<VertexRef>> previous_index;
     const double radius_sq = connect_radius * connect_radius;
+    std::vector<ComponentNodeInfo> node_infos;
 
     for (const IsoMesh& layer : layers) {
         int local_components = 0;
         const std::vector<int> local_vertex_components = vertexComponents(layer, &local_components);
+        std::vector<std::size_t> local_triangle_counts(static_cast<std::size_t>(local_components), 0);
+        for (const Tri& triangle : layer.triangles) {
+            const int component = local_vertex_components[triangle.v0];
+            if (component >= 0) {
+                ++local_triangle_counts[static_cast<std::size_t>(component)];
+            }
+        }
+
         std::vector<int> component_nodes(static_cast<std::size_t>(local_components), -1);
         for (int component = 0; component < local_components; ++component) {
             component_nodes[static_cast<std::size_t>(component)] = sets.add();
+            node_infos.push_back({});
+            node_infos.back().triangle_count = local_triangle_counts[static_cast<std::size_t>(component)];
+            node_infos.back().layer_min = layer.layer_id;
+            node_infos.back().layer_max = layer.layer_id;
         }
 
         for (std::size_t vertex_index = 0; vertex_index < layer.vertices.size(); ++vertex_index) {
@@ -249,6 +555,12 @@ int countLayerShellComponents(const std::vector<IsoMesh>& layers, double connect
                 continue;
             }
             const int node = component_nodes[static_cast<std::size_t>(local_component)];
+            ComponentNodeInfo& node_info = node_infos[static_cast<std::size_t>(node)];
+            ++node_info.vertex_count;
+            node_info.bbox.expand(layer.vertices[vertex_index]);
+            node_info.layer_min = std::min(node_info.layer_min, layer.layer_id);
+            node_info.layer_max = std::max(node_info.layer_max, layer.layer_id);
+
             const CellKey key = cellKey(layer.vertices[vertex_index], connect_radius);
             const long long kx = std::get<0>(key);
             const long long ky = std::get<1>(key);
@@ -281,7 +593,52 @@ int countLayerShellComponents(const std::vector<IsoMesh>& layers, double connect
         }
     }
 
-    return sets.parent.empty() ? 0 : sets.countRoots();
+    std::vector<ComponentSummary> components;
+    if (!sets.parent.empty()) {
+        std::map<int, ComponentSummary> by_root;
+        for (int node = 0; node < static_cast<int>(node_infos.size()); ++node) {
+            const ComponentNodeInfo& node_info = node_infos[static_cast<std::size_t>(node)];
+            const int root = sets.find(node);
+            auto inserted = by_root.emplace(root, ComponentSummary{});
+            ComponentSummary& component = inserted.first->second;
+            if (inserted.second) {
+                component.root_id = root;
+                component.layer_min = std::numeric_limits<int>::max();
+                component.layer_max = std::numeric_limits<int>::min();
+            }
+            component.root_id = root;
+            component.triangle_count += node_info.triangle_count;
+            component.vertex_count += node_info.vertex_count;
+            if (node_info.bbox.valid()) {
+                component.bbox.expand(node_info.bbox.min);
+                component.bbox.expand(node_info.bbox.max);
+            }
+            component.layer_min = std::min(component.layer_min, node_info.layer_min);
+            component.layer_max = std::max(component.layer_max, node_info.layer_max);
+        }
+        for (const auto& item : by_root) {
+            components.push_back(item.second);
+        }
+    }
+
+    std::sort(components.begin(), components.end(), [](const ComponentSummary& lhs, const ComponentSummary& rhs) {
+        return lhs.vertex_count > rhs.vertex_count;
+    });
+
+    std::vector<std::string> summaries;
+    const std::size_t print_count = std::min<std::size_t>(5, components.size());
+    for (std::size_t i = 0; i < print_count; ++i) {
+        summaries.push_back(formatComponentSummary(i, components[i]));
+        std::cout << summaries.back() << '\n';
+    }
+    if (component_details != nullptr) {
+        *component_details = components;
+    }
+    if (component_summary != nullptr) {
+        *component_summary = summaries;
+    }
+
+    return static_cast<int>(components.size());
 }
 
 std::pair<double, double> finiteRange(const ScalarField& phi)
@@ -368,10 +725,70 @@ void writeMetricsJson(const ModelReport& report, const std::filesystem::path& ou
         }
         output << ']';
     };
+    const auto writeDoubleArray = [&output](const std::vector<double>& values) {
+        output << '[';
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) {
+                output << ", ";
+            }
+            output << values[i];
+        }
+        output << ']';
+    };
 
     output << "{\n";
     output << "  \"model\": \"" << report.name << "\",\n";
-    output << "  \"source\": \"phase2_field\",\n";
+    output << "  \"source\": \"" << (report.pipeline.empty() ? "field" : report.pipeline) << "\",\n";
+    output << "  \"M1\": {\n";
+    output << "    \"max_abs_mean_curvature\": " << report.m1_max_abs_mean_curvature << ",\n";
+    output << "    \"per_layer\": ";
+    writeDoubleArray(report.m1_per_layer);
+    output << "\n";
+    output << "  },\n";
+    output << "  \"M2\": {\n";
+    output << "    \"hemisphere_violation_ratio\": " << report.m2_hemisphere_violation_ratio << "\n";
+    output << "  },\n";
+    output << "  \"phi\": {\n";
+    output << "    \"min_pre_shift\": " << report.phi_min_pre_shift << ",\n";
+    output << "    \"max_pre_shift\": " << report.phi_max_pre_shift << ",\n";
+    output << "    \"range_pre_shift\": " << report.phi_range_pre_shift << ",\n";
+    output << "    \"progression\": " << report.phi_progression << ",\n";
+    output << "    \"bbox_extent\": " << report.phi_bbox_extent << ",\n";
+    output << "    \"min\": " << report.phi_min << ",\n";
+    output << "    \"max\": " << report.phi_max << ",\n";
+    output << "    \"min_voxel\": [" << report.phi_min_voxel.x << ", "
+           << report.phi_min_voxel.y << ", " << report.phi_min_voxel.z << "],\n";
+    output << "    \"max_voxel\": [" << report.phi_max_voxel.x << ", "
+           << report.phi_max_voxel.y << ", " << report.phi_max_voxel.z << "],\n";
+    output << "    \"min_point\": [" << report.phi_min_point.x << ", "
+           << report.phi_min_point.y << ", " << report.phi_min_point.z << "],\n";
+    output << "    \"max_point\": [" << report.phi_max_point.x << ", "
+           << report.phi_max_point.y << ", " << report.phi_max_point.z << "],\n";
+    output << "    \"min_sdf\": " << report.phi_min_sdf << ",\n";
+    output << "    \"max_sdf\": " << report.phi_max_sdf << ",\n";
+    output << "    \"min_alignment\": " << report.phi_min_alignment << ",\n";
+    output << "    \"max_alignment\": " << report.phi_max_alignment << ",\n";
+    output << "    \"min_on_bottom_boundary\": " << (report.phi_min_on_bottom_boundary ? "true" : "false") << ",\n";
+    output << "    \"max_on_top_boundary\": " << (report.phi_max_on_top_boundary ? "true" : "false") << "\n";
+    output << "  },\n";
+    output << "  \"components\": [\n";
+    for (std::size_t i = 0; i < report.component_details.size(); ++i) {
+        const ComponentSummary& component = report.component_details[i];
+        output << "    {\"root_id\": " << component.root_id
+               << ", \"vertices\": " << component.vertex_count
+               << ", \"triangles\": " << component.triangle_count
+               << ", \"bbox_min\": [" << component.bbox.min.x << ", "
+               << component.bbox.min.y << ", " << component.bbox.min.z << "]"
+               << ", \"bbox_max\": [" << component.bbox.max.x << ", "
+               << component.bbox.max.y << ", " << component.bbox.max.z << "]"
+               << ", \"z_range\": [" << component.bbox.min.z << ", " << component.bbox.max.z << "]"
+               << ", \"layer_range\": [" << component.layer_min << ", " << component.layer_max << "]}";
+        if (i + 1 != report.component_details.size()) {
+            output << ',';
+        }
+        output << '\n';
+    }
+    output << "  ],\n";
     output << "  \"M4\": {\n";
     output << "    \"face_count\": " << report.face_count_total << ",\n";
     output << "    \"face_count_total\": " << report.face_count_total << ",\n";
@@ -390,9 +807,11 @@ void writeMetricsJson(const ModelReport& report, const std::filesystem::path& ou
     output << "    \"laplacian_ms\": " << report.laplacian_ms << ",\n";
     output << "    \"poisson_ms\": " << report.poisson_ms << ",\n";
     output << "    \"iso_surface_ms\": " << report.iso_surface_ms << ",\n";
-    output << "    \"solver_ms\": " << report.laplacian_ms << ",\n";
+    output << "    \"solver_ms\": " << (report.laplacian_ms + report.poisson_ms) << ",\n";
     output << "    \"stl_layer_count\": " << report.layer_count << ",\n";
-    output << "    \"peak_rss_mb\": " << report.peak_rss_mb << "\n";
+    output << "    \"peak_rss_mb\": " << report.peak_rss_mb << ",\n";
+    output << "    \"phi_min\": " << report.phi_min << ",\n";
+    output << "    \"phi_max\": " << report.phi_max << "\n";
     output << "  }\n";
     output << "}\n";
 }
@@ -422,6 +841,7 @@ BatchReport runBatch(const PipelineConfig& config)
         ModelReport report;
         report.name = model.name;
         report.stl_path = model.stl_path;
+        report.pipeline = config.algorithm.pipeline.empty() ? "scalar" : config.algorithm.pipeline;
 
         try {
             const auto read_start = Clock::now();
@@ -436,12 +856,61 @@ BatchReport runBatch(const PipelineConfig& config)
             const SDF sdf = buildSDF(mesh, config.voxel);
             const auto sdf_end = Clock::now();
 
-            const auto laplacian_start = Clock::now();
-            const LaplacianBC bc = generateBC(grid, sdf, config.field_boundary);
-            LaplacianParams laplacian_params = config.algorithm.field.laplacian;
-            const ScalarField phi = solveLaplacian(grid, bc, laplacian_params);
+            ScalarField phi;
+            bool phi_is_normalized = true;
+            double laplacian_ms = 0.0;
+            double poisson_ms = 0.0;
+            PhiGaugeDiagnostics gauge_diagnostics;
+            bool has_gauge_diagnostics = false;
+
+            if (report.pipeline == "scalar") {
+                const auto laplacian_start = Clock::now();
+                const LaplacianBC bc = generateBC(grid, sdf, config.field_boundary);
+                LaplacianParams laplacian_params = config.algorithm.field.laplacian;
+                phi = solveLaplacian(grid, bc, laplacian_params);
+                const auto laplacian_end = Clock::now();
+                laplacian_ms = elapsedMs(laplacian_start, laplacian_end);
+                phi_is_normalized = true;
+            } else if (report.pipeline == "vector_kuka") {
+                const auto laplacian_start = Clock::now();
+                std::cout << "[" << report.name << "] generateVectorBC begin\n" << std::flush;
+                const LaplacianVectorBC bc = generateVectorBC(grid, sdf, config.field_boundary);
+                std::cout << "[" << report.name << "] generateVectorBC done, fixed_count="
+                          << bc.fixed_indices.size() << "\n" << std::flush;
+                LaplacianParams laplacian_params = config.algorithm.field.laplacian;
+                std::cout << "[" << report.name << "] solveLaplacianVector begin\n" << std::flush;
+                const VectorField vector_field = solveLaplacianVector(grid, bc, laplacian_params);
+                std::cout << "[" << report.name << "] solveLaplacianVector done\n" << std::flush;
+                const auto laplacian_end = Clock::now();
+                laplacian_ms = elapsedMs(laplacian_start, laplacian_end);
+
+                const auto poisson_start = Clock::now();
+                std::cout << "[" << report.name << "] projectToHemisphere begin\n" << std::flush;
+                const VectorField clamped = projectToHemisphere(grid, vector_field, config.kuka.reachability);
+                std::cout << "[" << report.name << "] projectToHemisphere done\n" << std::flush;
+                report.m2_hemisphere_violation_ratio =
+                    hemisphereViolationRatio(grid, clamped, config.kuka.reachability);
+                if (report.m2_hemisphere_violation_ratio > 0.0) {
+                    throw std::runtime_error("hemisphere clamp left violating vectors");
+                }
+                PoissonParams poisson_params = config.algorithm.field.poisson;
+                poisson_params.anchor_voxel = chooseBottomAnchor(grid, sdf, config.field_boundary);
+                poisson_params.log_iterations = true;
+                poisson_params.progress_label = report.name;
+                std::cout << "[" << report.name << "] solvePoisson begin\n" << std::flush;
+                phi = solvePoisson(grid, clamped, poisson_params);
+                std::cout << "[" << report.name << "] solvePoisson done\n" << std::flush;
+                gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary);
+                has_gauge_diagnostics = true;
+                const auto poisson_end = Clock::now();
+                poisson_ms = elapsedMs(poisson_start, poisson_end);
+                phi_is_normalized = false;
+            } else {
+                throw std::runtime_error("algorithm.pipeline must be scalar or vector_kuka");
+            }
+
             validatePhi(phi);
-            const auto laplacian_end = Clock::now();
+            const auto phi_range = finiteRange(phi);
 
             const std::filesystem::path model_dir = config.io.output_root / model.name;
             std::filesystem::create_directories(model_dir);
@@ -452,7 +921,7 @@ BatchReport runBatch(const PipelineConfig& config)
             const auto iso_start = Clock::now();
             const std::vector<double> levels = planIsoLevels(
                 phi,
-                isoParamsFromConfig(config.iso_surface, config.field_boundary, phi.bbox));
+                isoParamsFromConfig(config.iso_surface, config.field_boundary, phi.bbox, phi_is_normalized));
             int layer_index = 0;
             std::vector<IsoMesh> layer_meshes;
             layer_meshes.reserve(levels.size());
@@ -462,6 +931,7 @@ BatchReport runBatch(const PipelineConfig& config)
                     continue;
                 }
                 const int components = countConnectedComponents(iso_mesh);
+                const double max_curvature = maxAbsMeanCurvature(computeMeanCurvature(iso_mesh));
                 writeIsoMeshStl(iso_mesh, layerPath(model_dir, layer_index));
 
                 report.iso_vertices += iso_mesh.vertices.size();
@@ -470,13 +940,20 @@ BatchReport runBatch(const PipelineConfig& config)
                 report.face_count_per_layer.push_back(iso_mesh.triangles.size());
                 report.connected_components_per_layer.push_back(components);
                 report.max_layer_connected_components = std::max(report.max_layer_connected_components, components);
+                report.m1_per_layer.push_back(max_curvature);
+                report.m1_max_abs_mean_curvature =
+                    std::max(report.m1_max_abs_mean_curvature, max_curvature);
                 layer_meshes.push_back(std::move(iso_mesh));
                 ++report.layer_count;
                 ++layer_index;
             }
             const double shell_connect_radius =
                 std::max(config.voxel.spacing_mm * 2.5, config.iso_surface.layer_thickness_mm * 1.75);
-            report.connected_components = countLayerShellComponents(layer_meshes, shell_connect_radius);
+            report.connected_components = countLayerShellComponents(
+                layer_meshes,
+                shell_connect_radius,
+                &report.component_details,
+                &report.component_summary);
             const auto iso_end = Clock::now();
 
             report.success = true;
@@ -487,10 +964,31 @@ BatchReport runBatch(const PipelineConfig& config)
             report.read_ms = elapsedMs(read_start, read_end);
             report.voxelize_ms = elapsedMs(voxel_start, voxel_end);
             report.sdf_ms = elapsedMs(sdf_start, sdf_end);
-            report.laplacian_ms = elapsedMs(laplacian_start, laplacian_end);
-            report.poisson_ms = 0.0;
+            report.laplacian_ms = laplacian_ms;
+            report.poisson_ms = poisson_ms;
             report.iso_surface_ms = elapsedMs(iso_start, iso_end);
             report.peak_rss_mb = currentPeakRssMb();
+            report.phi_min_pre_shift = has_gauge_diagnostics ? gauge_diagnostics.min_pre_shift : phi_range.first;
+            report.phi_max_pre_shift = has_gauge_diagnostics ? gauge_diagnostics.max_pre_shift : phi_range.second;
+            report.phi_range_pre_shift =
+                has_gauge_diagnostics ? gauge_diagnostics.range_pre_shift : (phi_range.second - phi_range.first);
+            report.phi_progression = has_gauge_diagnostics ? gauge_diagnostics.progression : 0.0;
+            report.phi_bbox_extent =
+                has_gauge_diagnostics ? gauge_diagnostics.bbox_extent : projectedExtent(phi.bbox, config.field_boundary);
+            report.phi_min = phi_range.first;
+            report.phi_max = phi_range.second;
+            if (has_gauge_diagnostics) {
+                report.phi_min_voxel = gauge_diagnostics.min_voxel;
+                report.phi_max_voxel = gauge_diagnostics.max_voxel;
+                report.phi_min_point = gauge_diagnostics.min_point;
+                report.phi_max_point = gauge_diagnostics.max_point;
+                report.phi_min_sdf = gauge_diagnostics.min_sdf;
+                report.phi_max_sdf = gauge_diagnostics.max_sdf;
+                report.phi_min_alignment = gauge_diagnostics.min_alignment;
+                report.phi_max_alignment = gauge_diagnostics.max_alignment;
+                report.phi_min_on_bottom_boundary = gauge_diagnostics.min_on_bottom_boundary;
+                report.phi_max_on_top_boundary = gauge_diagnostics.max_on_top_boundary;
+            }
             report.metrics_path = model_dir / "metrics.json";
 
             writeMetricsJson(report, report.metrics_path);
@@ -524,6 +1022,7 @@ void printBatchReport(const BatchReport& report, std::ostream& output)
     for (const ModelReport& model : report.models) {
         output << "ModelReport name=" << model.name
                << " status=" << (model.success ? "ok" : "failed")
+               << " pipeline=" << model.pipeline
                << " triangles=" << model.triangle_count
                << " read_ms=" << std::fixed << std::setprecision(3) << model.read_ms
                << " voxelize_ms=" << model.voxelize_ms
@@ -551,7 +1050,37 @@ void printBatchReport(const BatchReport& report, std::ostream& output)
                        << " max_layer_connected_components=" << model.max_layer_connected_components
                        << " layer_count=" << model.layer_count
                        << " face_count_total=" << model.face_count_total
+                       << " m1_max_abs_mean_curvature=" << model.m1_max_abs_mean_curvature
+                       << " m2_hemisphere_violation_ratio=" << model.m2_hemisphere_violation_ratio
+                       << " phi_min_pre_shift=" << model.phi_min_pre_shift
+                       << " phi_max_pre_shift=" << model.phi_max_pre_shift
+                       << " phi_range_pre_shift=" << model.phi_range_pre_shift
+                       << " phi_progression=" << model.phi_progression
+                       << " phi_bbox_extent=" << model.phi_bbox_extent
+                       << " phi_min=" << model.phi_min
+                       << " phi_max=" << model.phi_max
                        << '\n';
+                if (model.pipeline == "vector_kuka") {
+                    output << "  phi_diagnostic min_voxel=(" << model.phi_min_voxel.x << ','
+                           << model.phi_min_voxel.y << ',' << model.phi_min_voxel.z << ")"
+                           << " min_point=(" << model.phi_min_point.x << ','
+                           << model.phi_min_point.y << ',' << model.phi_min_point.z << ")"
+                           << " min_sdf=" << model.phi_min_sdf
+                           << " min_alignment=" << model.phi_min_alignment
+                           << " min_on_bottom_boundary="
+                           << (model.phi_min_on_bottom_boundary ? "true" : "false")
+                           << " max_voxel=(" << model.phi_max_voxel.x << ','
+                           << model.phi_max_voxel.y << ',' << model.phi_max_voxel.z << ")"
+                           << " max_point=(" << model.phi_max_point.x << ','
+                           << model.phi_max_point.y << ',' << model.phi_max_point.z << ")"
+                           << " max_sdf=" << model.phi_max_sdf
+                           << " max_alignment=" << model.phi_max_alignment
+                           << " max_on_top_boundary="
+                           << (model.phi_max_on_top_boundary ? "true" : "false") << '\n';
+                }
+                for (const std::string& summary : model.component_summary) {
+                    output << "  " << summary << '\n';
+                }
                 output << "  face_count_per_layer=[";
                 for (std::size_t i = 0; i < model.face_count_per_layer.size(); ++i) {
                     if (i != 0) {

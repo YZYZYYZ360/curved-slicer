@@ -31,6 +31,9 @@ print_direction       = [0.0, 0.0, 1.0]
 bottom_dot_threshold  = -0.5
 bottom_sdf_band       = 1.0
 
+[algorithm]
+pipeline = "vector_kuka"
+
 [algorithm.field.laplacian]
 max_iterations      = 2000
 tolerance           = 1e-6
@@ -102,6 +105,10 @@ platform_y  = 0.0
 platform_z  = 0.0
 z_offset    = 0.28
 robot_ini_abc = [0.0, 0.0, 0.0]
+
+[kuka.reachability]
+workpiece_up = [0.0, 0.0, 1.0]
+min_dot_threshold = 0.05
 
 [kuka.world_to_base]
 world_to_base = [

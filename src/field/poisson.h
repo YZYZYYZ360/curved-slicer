@@ -3,7 +3,7 @@
 #include "core/types.h"
 #include "geometry/voxel_grid.h"
 
-#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace cslc {
@@ -15,6 +15,10 @@ struct PoissonParams {
     double tolerance = 1e-6;
     bool use_precondition = true;
     VoxelIndex anchor_voxel{0, 0, 0};
+    bool log_iterations = false;
+    std::string progress_label;
+    int* out_iterations = nullptr;
+    double* out_error = nullptr;
 };
 
 struct ScalarField {
@@ -26,9 +30,6 @@ struct ScalarField {
     std::vector<double> values;
 };
 
-inline ScalarField solvePoisson(const VoxelGrid&, const VectorField&, const PoissonParams&)
-{
-    throw std::runtime_error("not implemented until Phase 3");
-}
+ScalarField solvePoisson(const VoxelGrid& grid, const VectorField& field, const PoissonParams& params);
 
 }  // namespace cslc

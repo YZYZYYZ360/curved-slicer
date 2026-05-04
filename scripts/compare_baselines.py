@@ -46,6 +46,29 @@ def connected_components(metrics: dict[str, Any]) -> int | None:
     return None
 
 
+def max_layer_connected_components(metrics: dict[str, Any]) -> int | None:
+    m4 = metrics.get("M4", {})
+    value = m4.get("max_connected_components_per_layer")
+    if value is not None:
+        return int(value)
+    per_layer = m4.get("connected_components_per_layer")
+    if per_layer:
+        return int(np.max(np.asarray(per_layer, dtype=np.int64)))
+    return None
+
+
+def max_abs_mean_curvature(metrics: dict[str, Any]) -> float | None:
+    m1 = metrics.get("M1", {})
+    value = m1.get("max_abs_mean_curvature")
+    return None if value is None else float(value)
+
+
+def hemisphere_violation_ratio(metrics: dict[str, Any]) -> float | None:
+    m2 = metrics.get("M2", {})
+    value = m2.get("hemisphere_violation_ratio")
+    return None if value is None else float(value)
+
+
 def solver_ms(metrics: dict[str, Any]) -> float | None:
     m6 = metrics.get("M6", {})
     for key in ("solver_ms", "wavefront_ms", "poisson_ms", "field_ms"):
@@ -75,6 +98,12 @@ def build_rows(old_metrics: dict[str, dict[str, Any]], new_metrics: dict[str, di
                 "M4_face_count_new": format_value(face_count(new)),
                 "M4_connected_components_old": format_value(connected_components(old)),
                 "M4_connected_components_new": format_value(connected_components(new)),
+                "M4_max_layer_cc_old": format_value(max_layer_connected_components(old)),
+                "M4_max_layer_cc_new": format_value(max_layer_connected_components(new)),
+                "M1_max_abs_mean_curvature_old": format_value(max_abs_mean_curvature(old)),
+                "M1_max_abs_mean_curvature_new": format_value(max_abs_mean_curvature(new)),
+                "M2_hemisphere_violation_old": format_value(hemisphere_violation_ratio(old)),
+                "M2_hemisphere_violation_new": format_value(hemisphere_violation_ratio(new)),
                 "M6_solver_ms_old": format_value(solver_ms(old)),
                 "M6_solver_ms_new": format_value(solver_ms(new)),
             }

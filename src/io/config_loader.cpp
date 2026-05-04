@@ -315,6 +315,9 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDouble(boundary, "bottom_dot_threshold", config.field_boundary.bottom_dot_threshold);
     readDouble(boundary, "bottom_sdf_band", config.field_boundary.bottom_sdf_band);
 
+    const toml::table* algorithm = tableAt(root, {"algorithm"});
+    readString(algorithm, "pipeline", config.algorithm.pipeline);
+
     const toml::table* laplacian = tableAt(root, {"algorithm", "field", "laplacian"});
     readInt(laplacian, "max_iterations", config.algorithm.field.laplacian.max_iterations);
     readDouble(laplacian, "tolerance", config.algorithm.field.laplacian.tolerance);
@@ -364,6 +367,16 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDouble(robot, "platform_z", config.kuka.robot.platform_z);
     readDouble(robot, "z_offset", config.kuka.robot.z_offset);
     readDoubleArray3(robot, "robot_ini_abc", config.kuka.robot.robot_ini_abc);
+
+    const toml::table* reachability = tableAt(root, {"kuka", "reachability"});
+    std::array<double, 3> workpiece_up{
+        config.kuka.reachability.workpiece_up.x,
+        config.kuka.reachability.workpiece_up.y,
+        config.kuka.reachability.workpiece_up.z,
+    };
+    readDoubleArray3(reachability, "workpiece_up", workpiece_up);
+    config.kuka.reachability.workpiece_up = {workpiece_up[0], workpiece_up[1], workpiece_up[2]};
+    readDouble(reachability, "min_dot_threshold", config.kuka.reachability.min_dot_threshold);
 
     readMatrix4x4(tableAt(root, {"kuka", "world_to_base"}), "world_to_base", config.kuka.world_to_base);
 

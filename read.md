@@ -516,3 +516,281 @@ mao: grid=86x106x142 occupied=568639 layer_count=88
 
 - deferred to Phase 3：完整向量 Laplacian + KUKA projection + Poisson 流水线。
 - deferred to Phase 5：旧项目 baseline 产物生成器。
+
+## Phase 3 进度与阻塞（v4 §6）
+
+本轮已按 v4 §6 开始接入向量 Laplacian + hemisphere clamp + Poisson，但在首个真实
+`armadillo_flat + spacing=0.5mm + pipeline=vector_kuka` 验证中触发用户指定停止条件：
+Poisson 输出的 φ 场出现负值。因此未继续跑 bunny / mao，也未做平移 offset 或 fallback。
+
+当前结构（供 Claude 同步）：
+
+```text
+src/
+├── app/pipeline.{h,cpp}                 # 已加 scalar / vector_kuka 分流、M1/M2 JSON 字段
+├── field/kuka_projection.{h,cpp}        # 新增 hemisphere clamp
+├── field/laplacian.{h,cpp}              # 保留标量版本，新增 generateVectorBC / solveLaplacianVector
+├── field/poisson.{h,cpp}                # Phase 3 重建 Poisson
+├── io/config_loader.{h,cpp}             # 新增 algorithm.pipeline 与 kuka.reachability 解析
+├── metrics/curvature.{h,cpp}            # 新增 IsoMesh M1 近似曲率计算
+└── surface/{iso_surface,mc_lookup_table}.h / iso_surface.cpp
+
+tests/
+├── laplacian_smoke_test.cpp             # 已覆盖标量 φ 与向量 G smoke
+├── poisson_smoke_test.cpp               # 新增常量向上 G → 单调 φ smoke
+└── phase2_field_batch_report.cpp        # 手动驱动支持 scalar / vector_kuka 参数
+```
+
+默认测试：
+
+```text
+ctest --test-dir build_nmake --output-on-failure
+100% tests passed, 0 tests failed out of 7
+```
+
+阻塞命令与现象：
+
+```text
+build_nmake\phase2_field_batch_report.exe armadillo_flat vector_kuka
+Curved Slicer Batch Report
+success=0 failure=1 total_ms=34573.080
+ModelReport name=armadillo_flat status=failed pipeline=vector_kuka
+  error=phi field has negative values
+phase2_field_batch_report failed: all requested models should succeed
+```
+
+问题处理：
+
+1. 现象：`solvePoisson` 在非均匀向量场上得到的 φ 存在负值。
+   影响：触发 Phase 3 用户停止条件，不能继续三模型验收，也不能比较 M1/M2。
+   处理：已停止；未添加 φ 平移、重锚定、fallback 或调参补丁。需要 Claude 判断这是
+   Poisson 右端项符号/边界离散问题，还是“Poisson 势函数 gauge 任意，应允许统一
+   shift 到非负”的规格问题。
+
+2. 现象：`poisson_smoke_test` 的常量 `[0,0,1]` 向量场可重建单调高度场，说明基础
+   图 Laplacian/anchor 路径在解析场上可用。
+   影响：问题集中在真实模型的非均匀顶面 BC + hemisphere clamp 后的 Poisson φ
+   零点/符号约定。
+   处理：保留当前实现和测试，等待架构侧确认后再继续。
+
+## Phase 3 anchor 修复（D7-D8）
+
+Claude 判断 Poisson 负值不是 gauge 噪声，而是 anchor 选择错误。已按 D7 在
+`pipeline.cpp` 的 `vector_kuka` 分支新增 `chooseBottomAnchor`：只从满足 Phase 2
+底面几何判据的体素里选 `alignment` 最负的体素作为 Poisson anchor，并钉
+`phi(anchor)=0`。未做 min-shift 兜底。
+
+同步改动：
+
+- `src/app/pipeline.{h,cpp}`：新增 `phi_min/phi_max` 到 `ModelReport` 和 metrics.json，
+  用于 D8 检查量纲。
+- `README.md` / `read.md`：记录 anchor bug 与修复原因。
+
+待验证：
+
+```text
+build_nmake\phase2_field_batch_report.exe armadillo_flat vector_kuka
+build_nmake\phase2_field_batch_report.exe all vector_kuka
+build_nmake\phase2_field_batch_report.exe all scalar
+```
+
+D8 复测结果：
+
+```text
+build_nmake\phase2_field_batch_report.exe armadillo_flat vector_kuka
+Curved Slicer Batch Report
+success=0 failure=1 total_ms=32932.221
+ModelReport name=armadillo_flat status=failed pipeline=vector_kuka
+  error=phi field has negative values min=-1.22723 max=38.4094
+```
+
+问题处理：
+
+1. 现象：修复 bottom anchor 后，`armadillo_flat` 的 `phi_min=-1.22723`，明显小于
+   D8 阈值 `-1e-6`；`phi_max=38.4094mm`，量级接近 bbox 高度，未出现 1000mm 或
+   0.01mm 级量纲异常。
+   影响：仍触发 Phase 3 停止条件，不能进入三模型 D9 验收。
+   处理：按用户要求停止；未改 Poisson 符号、未做 min-shift。下一步需要 Claude
+   确认是否将离散 Poisson 右端项符号从当前实现调整为相反号。
+
+## Phase 3 gauge shift 闸门结果（D10）
+
+按 Claude 最新说明，已实现 D10 的后置 gauge 重锚定，但 shift 前先执行几何诊断闸门：
+`phi_min` 必须位于底面 narrow band，`phi_max` 必须位于顶面 narrow band，漂移比例
+不得超过 10%，量纲需在 bbox 高度 0.5x--2.0x 范围内。当前没有放宽闸门。
+
+复测结果：
+
+```text
+build_nmake\phase2_field_batch_report.exe armadillo_flat vector_kuka
+Curved Slicer Batch Report
+success=0 failure=1 total_ms=32803.516
+ModelReport name=armadillo_flat status=failed pipeline=vector_kuka
+  error=phi_max not on top boundary, possible bug; max voxel=(27,42,89)
+  point=(-5.30092,7.3015,22.5586) sdf=0.36588 alignment=0.473609
+```
+
+问题处理：
+
+1. 现象：D10 闸门在 `phi_max` 顶面判定处失败。最大值体素位于 z 最大层
+   `voxel.z=89`，但 SDF 法向与 print_direction 的 alignment 为 `0.473609`，
+   小于当前顶面阈值 `-bottom_dot_threshold = 0.5`。
+   影响：按 D10 规则，不能执行 gauge shift，也不能进入 D11 三模型验收。
+   处理：已停止；未放宽顶面阈值、未绕过闸门、未执行三模型验收。需要 Claude
+   判断这是顶面闸门应允许阈值容差，还是 `phi_max` 几何位置确实不满足预期。
+
+## Phase 3 D10' 投影闸门与 D11 阻塞
+
+按 Claude 最新指示，D10 alignment/narrow-band 闸门已替换为 D10'：
+
+- `progression >= 0.5 * bbox_extent`
+- `0.3 * bbox_extent <= phi_range <= 3.0 * bbox_extent`
+- `phi_min_pre_shift >= -0.10 * phi_range`
+
+alignment / sdf / voxel / world point 仍写入诊断，但不参与放行。`armadillo_flat`
+的 D10' 通过并完成 gauge shift：
+
+```text
+progression=44.500 bbox_extent=44.885
+phi_min_pre_shift=-1.227 phi_max_pre_shift=38.409 phi_range_pre_shift=39.637
+phi_min=0.000 phi_max=39.637
+min_voxel=(53,8,0) min_point=(7.699,-9.698,-21.941) min_sdf=0.058 min_alignment=-0.254
+max_voxel=(27,42,89) max_point=(-5.301,7.302,22.559) max_sdf=0.366 max_alignment=0.474
+```
+
+D11 首个模型验收失败：
+
+```text
+build_nmake\phase2_field_batch_report.exe armadillo_flat vector_kuka
+success=1 failure=0 total_ms=44235.166
+connected_components=2 max_layer_connected_components=36 layer_count=49
+face_count_total=78990 m1_max_abs_mean_curvature=209.311
+m2_hemisphere_violation_ratio=0.000
+```
+
+问题处理：
+
+1. 现象：D10' 通过后，`armadillo_flat vector_kuka` 的 per-model
+   `connected_components=2`。
+   影响：违反 Phase 3 D11 硬阈值 `per-model cc=1`，不能继续宣称三模型验收。
+   处理：已停止；未调 `shell_connect_radius`、未改 MC 顶点合并、未调
+   ReachabilityParams，也未继续 bunny/mao。
+
+2. 现象：当前手动驱动仍保留旧的 `layer_count >= 50` assertion；本次
+   `layer_count=49`，但相对 Phase 2 armadillo 的 56 层下降约 12.5%，在 v4 §6.6
+   “不劣化超过 15%”口径内。
+   影响：即使 per-model cc 修复，手动驱动也可能被旧阈值误拦。
+   处理：未自行修改验收驱动阈值；需要 Claude 确认是否将该 assertion 改为
+   与 scalar baseline 对比的 15% 阈值。
+
+## Phase 3 D12-D15 连通分量诊断
+
+按 Claude 指示，未调 `shell_connect_radius`、未改 MC、未改 ReachabilityParams。
+本轮仅加入 UF 分量画像，并把 `phase2_field_batch_report.cpp` 的 per-model cc=1
+改成临时 warn；`layer_count` 旧阈值从 50 改成 47（Phase 2 armadillo 56 层的
+15% 容忍口径）。
+
+默认测试：
+
+```text
+ctest --test-dir build_nmake --output-on-failure
+100% tests passed, 0 tests failed out of 7
+```
+
+三模型 scalar 对照已跑完：
+
+```text
+scalar armadillo_flat: cc=1 max_layer_cc=72 layer_count=56 face_count=580804 M1=519869.161 solver_ms=2007.711
+scalar bunny:          cc=1 max_layer_cc=29 layer_count=56 face_count=872460 M1=3361.273   solver_ms=5495.671
+scalar mao:            cc=1 max_layer_cc=91 layer_count=88 face_count=4105921 M1=7032.497  solver_ms=40963.283
+```
+
+vector_kuka 已完成 armadillo_flat / bunny；mao 单模型 60 分钟超时，无 metrics：
+
+```text
+vector armadillo_flat:
+  cc=2 max_layer_cc=36 layer_count=49 face_count=78990 M1=209.311 M2=0
+  D10': progression=44.500 bbox_extent=44.885 phi_range=39.637 min_pre_shift=-1.227
+  component[0] vertices=45052 triangles=78986 z=[-21.9414,22.4954] layer=[0,48]
+  component[1] vertices=6 triangles=4 z=[11.5151,11.5586] layer=[38,38]
+
+vector bunny:
+  cc=1 max_layer_cc=39 layer_count=47 face_count=244079 M1=2315.160 M2=0
+  D10': progression=44.500 bbox_extent=45.000 phi_range=37.949 min_pre_shift=-0.773
+  component[0] vertices=129939 triangles=244079 z=[15.2499,59.7499] layer=[0,46]
+
+vector mao:
+  blocked by timeout: phase2_field_batch_report.exe mao vector_kuka ran 60 min and timed out
+```
+
+对照结论：
+
+```text
+armadillo max_layer_cc: 72 -> 36，下降 50.0%，刚好达标；per-model cc=2 未达标。
+armadillo M1: 519869.161 -> 209.311，显著下降。
+bunny max_layer_cc: 29 -> 39，未下降，反而上升约 34.5%，未达标。
+bunny M1: 3361.273 -> 2315.160，下降约 31.1%，达标。
+mao vector_kuka：Poisson/SimplicialCholesky 路径 60 分钟超时，未取得 D12 诊断。
+```
+
+问题处理：
+
+1. 现象：`armadillo_flat` 的第二个 per-model 分量只有 6 个顶点 / 4 个三角形，
+   只出现在单层 `layer=38`。
+   影响：per-model cc 硬阈值被极小孤立碎片触发，可能需要后续判断是否作为
+   几何/MC 碎片后处理，而不是主体断裂。
+   处理：只记录诊断；未合并、未过滤、未调半径。
+
+2. 现象：`bunny` per-model cc=1，但 max_layer_cc 从 29 升到 39。
+   影响：违反 v4 §6.6 “max(per-layer cc) 下降 ≥50%”。
+   处理：停止在诊断汇报；未调参。
+
+3. 现象：`mao vector_kuka` 单模型 60 分钟超时。
+   影响：三模型 vector_kuka 验收未完成，总耗时也无法满足 <15min。
+   处理：未切换求解器、未改 `use_precondition`，等待 Claude 判断 Poisson 大模型路径。
+
+## Phase 3 D16-D18 定位与 Poisson 预条件修复
+
+D16 对 `mao vector_kuka` 增加阶段进度打印后，10 分钟诊断结果：
+
+```text
+[mao] generateVectorBC begin
+[mao] generateVectorBC done, fixed_count=39480
+[mao] solveLaplacianVector begin
+[mao] solveLaplacianVector done
+[mao] projectToHemisphere begin
+[mao] projectToHemisphere done
+[mao] solvePoisson begin
+```
+
+结论：超时点确认为 `solvePoisson`。按 D17(a)，`PoissonParams.use_precondition=true`
+不再映射到 `Eigen::SimplicialCholesky`，改为
+`ConjugateGradient<SparseMatrix, Lower|Upper, IncompleteCholesky<double>>`，避免
+568K 体素 Poisson 系统的直接分解 fill-in。
+
+D18 已接入：`phase2_field_batch_report.cpp` 不再要求 per-model cc 字面等于 1，
+改为最大连通分量顶点占比 `> 99%`。armadillo 的 45052/(45052+6)=99.987% 可通过。
+
+IC-CG 复测：
+
+```text
+mao vector_kuka:
+[mao] solvePoisson begin
+error=solvePoisson IncompleteCholesky ConjugateGradient did not converge
+total_ms=491023.303
+```
+
+处理：仍按 D17(a) 的预条件路线，改用 `IncompleteLUT<double>` 作为 CG 预条件，并在
+非收敛错误中输出 iterations / residual error。
+
+ILUT-CG 复测：
+
+```text
+mao vector_kuka:
+[mao] solvePoisson begin
+command timed out after 1800s
+```
+
+结论：ILUT-CG 在 mao 上 30 分钟仍无结果，比 IC-CG 更差。当前代码恢复为
+`IncompleteCholesky<double>` CG，并保留 iterations / residual error 输出，等待
+Claude 决定下一步是否提高 max_iterations、改 RHS/矩阵尺度，或采用分层/多重网格策略。

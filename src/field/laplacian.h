@@ -22,6 +22,11 @@ struct LaplacianBC {
     std::vector<double> fixed_values;
 };
 
+struct LaplacianVectorBC {
+    std::vector<VoxelIndex> fixed_indices;
+    std::vector<Vec3> fixed_vectors;
+};
+
 struct LaplacianParams {
     int max_iterations = 2000;
     double tolerance = 1e-6;
@@ -38,5 +43,9 @@ struct VectorField {
 
 LaplacianBC generateBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params);
 ScalarField solveLaplacian(const VoxelGrid& grid, const LaplacianBC& bc, const LaplacianParams& params);
+LaplacianVectorBC generateVectorBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params);
+VectorField solveLaplacianVector(const VoxelGrid& grid,
+                                 const LaplacianVectorBC& bc,
+                                 const LaplacianParams& params);
 
 }  // namespace cslc

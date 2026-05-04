@@ -1,0 +1,128 @@
+# ================== config/mao_rescaled.toml ==================
+# Phase 3 D20 专用配置：仅跑 mao 模型的 0.7x 缩放版本（用户手动 rescale）。
+# 用途：判别 mao 原版 Poisson 不收敛是规模主导（~568K 体素）还是几何主导
+# （hair/眉/嘴等高频特征导致 div_G 高频噪声）。
+#
+# 0.7x 缩放保留所有几何特征，仅等比缩小 bbox 到 ~29x36x49mm，体素数约
+# 195K（介于 bunny 170K 和 mao 568K 之间）。
+#
+# 场景判别：
+#   收敛 < 600s  → 规模主导（mao 原版可考虑降 spacing 或换求解器）
+#   仍不收敛     → 几何主导（架构需加 G 平滑预处理 = v4 §7）
+
+[io]
+output_root              = "../runs/phase3_mao_rescaled"
+runs_csv                 = "../runs/phase3_mao_rescaled/runs.csv"
+debug_dump_intermediates = true
+
+[[io.models]]
+name     = "mao_rescaled"
+stl_path = "../tests/models/毛主席头雕(42_52_70)_1_Rescaled(0.7).stl"
+
+[voxel]
+spacing_mm   = 0.5
+padding_mm   = 0.0
+sdf_band_mm  = 1.0
+
+[field.boundary]
+strategy             = "bottom_up"
+print_direction      = [0.0, 0.0, 1.0]
+bottom_dot_threshold = -0.5
+bottom_sdf_band      = 1.0
+
+[algorithm]
+pipeline = "vector_kuka"
+
+[algorithm.field.laplacian]
+max_iterations      = 2000
+tolerance           = 1e-6
+normalize_each_iter = false
+
+# Poisson 部分：log_iterations=true 让求解器每 50 次迭代打印一次 error，
+# 用于场景判别。
+[algorithm.field.poisson]
+max_iterations   = 500
+tolerance        = 1e-6
+use_precondition = true
+
+[iso_surface]
+layer_thickness_mm = 0.8
+iso_spacing        = "uniform"
+max_layers         = 500
+phi_start_offset   = 0.0
+
+[path]
+strategy               = "scanline"
+line_spacing_mm        = 0.4
+contour_resample_mm    = 0.2
+smooth_position_window = 5
+
+[path.smooth_orientation]
+lambda_data   = 1.0
+lambda_smooth = 10.0
+
+[path.spline]
+enabled                = true
+resample_n_per_segment = 3
+tension                = 0.5
+
+[kuka.limits.a1]
+min_deg = -170.0
+max_deg =  170.0
+speed_deg_per_s = 336.0
+
+[kuka.limits.a2]
+min_deg = -195.0
+max_deg =   40.0
+speed_deg_per_s = 336.0
+
+[kuka.limits.a3]
+min_deg = -115.0
+max_deg =  150.0
+speed_deg_per_s = 488.0
+
+[kuka.limits.a4]
+min_deg = -185.0
+max_deg =  185.0
+speed_deg_per_s = 600.0
+
+[kuka.limits.a5]
+min_deg = -120.0
+max_deg =  120.0
+speed_deg_per_s = 529.0
+
+[kuka.limits.a6]
+min_deg = -350.0
+max_deg =  350.0
+speed_deg_per_s = 800.0
+
+[kuka.robot]
+status      = 4
+turn        = 28
+tool_no     = 8
+base_no     = 6
+platform_x  = 0.0
+platform_y  = 0.0
+platform_z  = 0.0
+z_offset    = 0.28
+robot_ini_abc = [0.0, 0.0, 0.0]
+
+[kuka.reachability]
+workpiece_up      = [0.0, 0.0, 1.0]
+min_dot_threshold = 0.05
+
+[kuka.world_to_base]
+world_to_base = [
+  [1.0, 0.0, 0.0, 0.0],
+  [0.0, 1.0, 0.0, 0.0],
+  [0.0, 0.0, 1.0, 0.0],
+  [0.0, 0.0, 0.0, 1.0],
+]
+
+[metrics]
+enabled          = true
+sample_layer_ids = []
+output_per_layer = true
+
+[logging]
+level = "info"

@@ -54,7 +54,9 @@ add_library(curved_slicer_phase0
     src/geometry/voxel_grid.cpp
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
+    src/field/kuka_projection.cpp
     src/field/laplacian.cpp
+    src/field/poisson.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -146,6 +148,14 @@ add_executable(laplacian_smoke_test
 configure_phase0_test(laplacian_smoke_test)
 
 add_test(NAME laplacian_smoke COMMAND laplacian_smoke_test)
+
+add_executable(poisson_smoke_test
+    tests/poisson_smoke_test.cpp
+)
+
+configure_phase0_test(poisson_smoke_test)
+
+add_test(NAME poisson_smoke COMMAND poisson_smoke_test)
 
 add_executable(phase2_field_batch_report
     tests/phase2_field_batch_report.cpp

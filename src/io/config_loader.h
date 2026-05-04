@@ -1,6 +1,7 @@
 #pragma once
 
 #include "field/laplacian.h"
+#include "field/kuka_projection.h"
 #include "field/poisson.h"
 #include "geometry/voxel_grid.h"
 
@@ -29,6 +30,7 @@ struct AlgorithmFieldConfig {
 };
 
 struct AlgorithmConfig {
+    std::string pipeline = "scalar";
     AlgorithmFieldConfig field;
 };
 
@@ -84,6 +86,7 @@ struct KukaConfig {
         {-115.0, 150.0, 488.0}, {-185.0, 185.0, 600.0}, {-120.0, 120.0, 529.0},
         {-350.0, 350.0, 800.0}}};
     RobotConfig robot;
+    ReachabilityParams reachability;
     std::array<std::array<double, 4>, 4> world_to_base{{{{1.0, 0.0, 0.0, 0.0}},
         {{0.0, 1.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0, 0.0}}, {{0.0, 0.0, 0.0, 1.0}}}};
 };

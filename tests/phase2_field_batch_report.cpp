@@ -31,6 +31,22 @@ void require(bool condition, const char* message)
     }
 }
 
+double largestComponentVertexRatio(const cslc::ModelReport& model)
+{
+    std::size_t total_vertices = 0;
+    std::size_t largest_vertices = 0;
+    for (const cslc::ComponentSummary& component : model.component_details) {
+        total_vertices += component.vertex_count;
+        largest_vertices = std::max(largest_vertices, component.vertex_count);
+    }
+    return total_vertices == 0 ? 1.0 : static_cast<double>(largest_vertices) / static_cast<double>(total_vertices);
+}
+
+bool isPipelineName(const std::string& value)
+{
+    return value == "scalar" || value == "vector_kuka";
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -38,40 +54,71 @@ int main(int argc, char** argv)
     try {
         const std::filesystem::path root = sourceRoot();
         cslc::PipelineConfig config = cslc::loadPipelineConfig(root / "config" / "batch_three_models.toml");
-        config.io.output_root = root / "runs" / "phase2_field";
+        std::string requested_model;
+        std::string pipeline = config.algorithm.pipeline;
+        if (argc > 1) {
+            const std::string first = argv[1];
+            if (isPipelineName(first)) {
+                pipeline = first;
+            } else if (first != "all") {
+                requested_model = first;
+            }
+        }
+        if (argc > 2) {
+            pipeline = argv[2];
+        }
+        require(isPipelineName(pipeline), "pipeline should be scalar or vector_kuka");
+
+        config.algorithm.pipeline = pipeline;
+        config.io.output_root = root / "runs" / (pipeline == "scalar" ? "phase2_scalar" : "phase3_vector_kuka");
         config.io.debug_dump_intermediates = true;
         config.voxel.spacing_mm = 0.5;
         config.voxel.padding_mm = 0.0;
         config.voxel.sdf_band_mm = 1.0;
-        if (argc > 1) {
-            const std::string requested = argv[1];
+        if (!requested_model.empty()) {
             config.io.models.erase(
-                std::remove_if(config.io.models.begin(), config.io.models.end(), [&requested](const cslc::ModelConfig& model) {
-                    return model.name != requested;
+                std::remove_if(config.io.models.begin(), config.io.models.end(), [&requested_model](const cslc::ModelConfig& model) {
+                    return model.name != requested_model;
                 }),
                 config.io.models.end());
-            require(!config.io.models.empty(), "requested phase2 model name was not found");
+            require(!config.io.models.empty(), "requested model name was not found");
         }
 
         const cslc::BatchReport report = cslc::runBatch(config);
         cslc::printBatchReport(report, std::cout);
-        require(report.success_count == config.io.models.size(), "all three phase2 models should succeed");
-        require(report.failure_count == 0, "phase2 batch should not have failures");
+        require(report.success_count == config.io.models.size(), "all requested models should succeed");
+        require(report.failure_count == 0, "field batch should not have failures");
 
         for (const cslc::ModelReport& model : report.models) {
-            require(model.layer_count >= 50, "phase2 model should produce at least 50 layers at 0.5mm");
-            require(model.face_count_total > 0, "phase2 model should produce non-empty STL layers");
-            require(model.connected_components == 1, "phase2 per-model connected components should be 1");
+            require(model.layer_count >= 47, "model should stay within the Phase 3 15% layer-count tolerance");
+            require(model.face_count_total > 0, "model should produce non-empty STL layers");
+            const double main_component_ratio = largestComponentVertexRatio(model);
+            if (main_component_ratio <= 0.99) {
+                std::cerr << "WARN: main component ratio=" << main_component_ratio
+                          << " per-model cc=" << model.connected_components
+                          << " name=" << model.name
+                          << " pipeline=" << pipeline << '\n';
+            }
+            require(main_component_ratio > 0.99, "main connected component should contain more than 99% of vertices");
             require(model.face_count_per_layer.size() == static_cast<std::size_t>(model.layer_count),
                     "per-layer face counts should match layer_count");
             require(model.connected_components_per_layer.size() == static_cast<std::size_t>(model.layer_count),
                     "per-layer connected components should match layer_count");
+            require(model.m1_per_layer.size() == static_cast<std::size_t>(model.layer_count),
+                    "per-layer M1 values should match layer_count");
             for (std::size_t faces : model.face_count_per_layer) {
-                require(faces > 0, "each phase2 STL layer should be non-empty");
+                require(faces > 0, "each STL layer should be non-empty");
             }
-            std::cout << "phase2_model_cc name=" << model.name
+            if (pipeline == "vector_kuka") {
+                require(model.m2_hemisphere_violation_ratio == 0.0,
+                        "vector_kuka hemisphere violation ratio should be zero");
+            }
+            std::cout << "field_model_cc pipeline=" << pipeline
+                      << " name=" << model.name
                       << " connected_components=" << model.connected_components
-                      << " max_layer_connected_components=" << model.max_layer_connected_components << '\n';
+                      << " max_layer_connected_components=" << model.max_layer_connected_components
+                      << " m1_max_abs_mean_curvature=" << model.m1_max_abs_mean_curvature
+                      << " m2_hemisphere_violation_ratio=" << model.m2_hemisphere_violation_ratio << '\n';
             require(std::filesystem::exists(model.metrics_path), "phase2 metrics.json should be written");
             require(std::filesystem::exists(config.io.output_root / model.name / "phi_points.ply"),
                     "debug phi point cloud should be written");

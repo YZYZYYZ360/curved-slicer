@@ -103,10 +103,21 @@ int main()
             require(current + 1e-8 >= previous, "centerline phi should be monotonic");
         }
 
+        const cslc::LaplacianVectorBC vector_bc = cslc::generateVectorBC(grid, sdf, bc_params);
+        require(!vector_bc.fixed_indices.empty(), "vector BC should find boundary voxels");
+        const cslc::VectorField vector_field = cslc::solveLaplacianVector(grid, vector_bc, params);
+        const cslc::Vec3 center_vector = vector_field.values[denseIndex(n, n, n / 2, n / 2, n / 2)];
+        require(std::abs(center_vector.x) < 1e-8, "center vector x should stay zero");
+        require(std::abs(center_vector.y) < 1e-8, "center vector y should stay zero");
+        require(std::abs(center_vector.z - 1.0) < 1e-8, "center vector should point up");
+
         std::cout << "laplacian_smoke fixed=" << bc.fixed_indices.size()
+                  << " vector_fixed=" << vector_bc.fixed_indices.size()
                   << " bottom=" << bottom
                   << " middle=" << middle
-                  << " top=" << top << '\n';
+                  << " top=" << top
+                  << " center_vector=(" << center_vector.x << ", "
+                  << center_vector.y << ", " << center_vector.z << ")\n";
     } catch (const std::exception& ex) {
         return fail(ex.what());
     }

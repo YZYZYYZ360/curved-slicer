@@ -51,6 +51,13 @@ int main()
             config.algorithm.field.poisson.max_iterations != 500) {
             return fail("algorithm.field params should parse");
         }
+        if (config.algorithm.pipeline != "vector_kuka") {
+            return fail("algorithm.pipeline should parse as vector_kuka");
+        }
+        if (!nearlyEqual(config.kuka.reachability.workpiece_up.z, 1.0) ||
+            !nearlyEqual(config.kuka.reachability.min_dot_threshold, 0.05)) {
+            return fail("kuka.reachability should parse");
+        }
         if (!config.metrics.enabled || !config.metrics.output_per_layer) {
             return fail("metrics flags should parse");
         }

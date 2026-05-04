@@ -126,6 +126,27 @@ std::unordered_map<std::size_t, double> buildFixedMap(const VoxelGrid& grid, con
     return fixed;
 }
 
+std::unordered_map<std::size_t, Vec3> buildFixedVectorMap(const VoxelGrid& grid,
+                                                          const LaplacianVectorBC& bc)
+{
+    if (bc.fixed_indices.size() != bc.fixed_vectors.size()) {
+        throw std::runtime_error("LaplacianVectorBC fixed index/vector count mismatch");
+    }
+
+    std::unordered_map<std::size_t, Vec3> fixed;
+    fixed.reserve(bc.fixed_indices.size());
+    for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
+        const VoxelIndex& voxel = bc.fixed_indices[i];
+        if (grid.occupied(voxel.x, voxel.y, voxel.z)) {
+            fixed[grid.index(voxel.x, voxel.y, voxel.z)] = normalized(bc.fixed_vectors[i]);
+        }
+    }
+    if (fixed.empty()) {
+        throw std::runtime_error("solveLaplacianVector requires Dirichlet voxels");
+    }
+    return fixed;
+}
+
 ScalarField makeEmptyScalarField(const VoxelGrid& grid)
 {
     ScalarField field;
@@ -137,6 +158,22 @@ ScalarField makeEmptyScalarField(const VoxelGrid& grid)
     field.values.assign(
         static_cast<std::size_t>(field.nx) * static_cast<std::size_t>(field.ny) * static_cast<std::size_t>(field.nz),
         std::numeric_limits<double>::quiet_NaN());
+    return field;
+}
+
+VectorField makeEmptyVectorField(const VoxelGrid& grid)
+{
+    VectorField field;
+    field.bbox = grid.bbox();
+    field.spacing = grid.spacing();
+    field.nx = grid.nx();
+    field.ny = grid.ny();
+    field.nz = grid.nz();
+    field.values.assign(
+        static_cast<std::size_t>(field.nx) * static_cast<std::size_t>(field.ny) * static_cast<std::size_t>(field.nz),
+        Vec3{std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::quiet_NaN()});
     return field;
 }
 
@@ -188,6 +225,56 @@ LaplacianBC generateBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& pa
     }
     if (top_count == 0) {
         throw std::runtime_error("generateBC bottom_up found no top boundary voxels");
+    }
+    return bc;
+}
+
+LaplacianVectorBC generateVectorBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params)
+{
+    if (params.strategy != "bottom_up") {
+        throw std::runtime_error("not implemented in Phase 3");
+    }
+    if (grid.nx() != sdf.nx || grid.ny() != sdf.ny || grid.nz() != sdf.nz) {
+        throw std::runtime_error("generateVectorBC requires grid and SDF dimensions to match");
+    }
+
+    const Vec3 print_direction = directionFromParams(params);
+    const double sdf_band = params.bottom_sdf_band * grid.spacing();
+    std::size_t bottom_count = 0;
+    std::size_t top_count = 0;
+
+    LaplacianVectorBC bc;
+    const std::vector<VoxelIndex> voxels = grid.occupiedVoxels();
+    bc.fixed_indices.reserve(voxels.size() / 10 + 1);
+    bc.fixed_vectors.reserve(voxels.size() / 10 + 1);
+
+    for (const VoxelIndex& voxel : voxels) {
+        if (std::abs(sdfValue(sdf, voxel.x, voxel.y, voxel.z)) > sdf_band) {
+            continue;
+        }
+
+        const Vec3 normal = normalized(sdfGradient(sdf, voxel.x, voxel.y, voxel.z));
+        if (norm(normal) == 0.0) {
+            continue;
+        }
+
+        const double alignment = dot(normal, print_direction);
+        if (alignment < params.bottom_dot_threshold) {
+            bc.fixed_indices.push_back(voxel);
+            bc.fixed_vectors.push_back(print_direction);
+            ++bottom_count;
+        } else if (alignment > -params.bottom_dot_threshold) {
+            bc.fixed_indices.push_back(voxel);
+            bc.fixed_vectors.push_back(normal);
+            ++top_count;
+        }
+    }
+
+    if (bottom_count == 0) {
+        throw std::runtime_error("generateVectorBC bottom_up found no bottom boundary voxels");
+    }
+    if (top_count == 0) {
+        throw std::runtime_error("generateVectorBC bottom_up found no top boundary voxels");
     }
     return bc;
 }
@@ -271,6 +358,110 @@ ScalarField solveLaplacian(const VoxelGrid& grid, const LaplacianBC& bc, const L
         phi.values[denseIndex(phi.nx, phi.ny, voxel.x, voxel.y, voxel.z)] = solution[row];
     }
     return phi;
+}
+
+VectorField solveLaplacianVector(const VoxelGrid& grid,
+                                 const LaplacianVectorBC& bc,
+                                 const LaplacianParams& params)
+{
+    if (params.max_iterations <= 0) {
+        throw std::runtime_error("laplacian.max_iterations must be positive");
+    }
+    if (params.tolerance <= 0.0) {
+        throw std::runtime_error("laplacian.tolerance must be positive");
+    }
+
+    const std::vector<VoxelIndex> voxels = grid.occupiedVoxels();
+    if (voxels.empty()) {
+        throw std::runtime_error("solveLaplacianVector requires a non-empty occupied grid");
+    }
+
+    const auto rows = buildRowMap(grid, voxels);
+    const auto fixed = buildFixedVectorMap(grid, bc);
+    const int n = static_cast<int>(voxels.size());
+
+    std::vector<Triplet> triplets;
+    triplets.reserve(static_cast<std::size_t>(n) * 7);
+    std::array<Eigen::VectorXd, 3> rhs{
+        Eigen::VectorXd::Zero(n),
+        Eigen::VectorXd::Zero(n),
+        Eigen::VectorXd::Zero(n),
+    };
+
+    for (int row = 0; row < n; ++row) {
+        const VoxelIndex& voxel = voxels[static_cast<std::size_t>(row)];
+        const std::size_t key = grid.index(voxel.x, voxel.y, voxel.z);
+        const auto fixed_it = fixed.find(key);
+        if (fixed_it != fixed.end()) {
+            triplets.emplace_back(row, row, 1.0);
+            rhs[0][row] = fixed_it->second.x;
+            rhs[1][row] = fixed_it->second.y;
+            rhs[2][row] = fixed_it->second.z;
+            continue;
+        }
+
+        double diagonal = 0.0;
+        for (const auto& offset : kNeighbors) {
+            const int nx = voxel.x + offset[0];
+            const int ny = voxel.y + offset[1];
+            const int nz = voxel.z + offset[2];
+            if (!grid.occupied(nx, ny, nz)) {
+                continue;
+            }
+
+            ++diagonal;
+            const std::size_t neighbor_key = grid.index(nx, ny, nz);
+            const auto neighbor_fixed = fixed.find(neighbor_key);
+            if (neighbor_fixed != fixed.end()) {
+                rhs[0][row] += neighbor_fixed->second.x;
+                rhs[1][row] += neighbor_fixed->second.y;
+                rhs[2][row] += neighbor_fixed->second.z;
+            } else {
+                const auto neighbor_row = rows.find(neighbor_key);
+                if (neighbor_row != rows.end()) {
+                    triplets.emplace_back(row, neighbor_row->second, -1.0);
+                }
+            }
+        }
+
+        triplets.emplace_back(row, row, diagonal > 0.0 ? diagonal : 1.0);
+    }
+
+    SparseMatrix matrix(n, n);
+    matrix.setFromTriplets(triplets.begin(), triplets.end());
+
+    Eigen::ConjugateGradient<SparseMatrix, Eigen::Lower | Eigen::Upper> solver;
+    solver.setMaxIterations(params.max_iterations);
+    solver.setTolerance(params.tolerance);
+    solver.compute(matrix);
+    if (solver.info() != Eigen::Success) {
+        throw std::runtime_error("solveLaplacianVector ConjugateGradient setup failed");
+    }
+
+    std::array<Eigen::VectorXd, 3> solution{
+        Eigen::VectorXd::Zero(n),
+        Eigen::VectorXd::Zero(n),
+        Eigen::VectorXd::Zero(n),
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+        solution[axis] = solver.solve(rhs[axis]);
+        if (solver.info() != Eigen::Success ||
+            !std::isfinite(solver.error()) ||
+            solver.error() > params.tolerance) {
+            throw std::runtime_error("solveLaplacianVector ConjugateGradient did not converge");
+        }
+    }
+
+    VectorField field = makeEmptyVectorField(grid);
+    for (int row = 0; row < n; ++row) {
+        const VoxelIndex& voxel = voxels[static_cast<std::size_t>(row)];
+        Vec3 value{solution[0][row], solution[1][row], solution[2][row]};
+        if (norm(value) > 0.0) {
+            value = normalized(value);
+        }
+        field.values[denseIndex(field.nx, field.ny, voxel.x, voxel.y, voxel.z)] = value;
+    }
+    return field;
 }
 
 }  // namespace cslc

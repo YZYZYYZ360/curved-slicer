@@ -1,8 +1,10 @@
 #pragma once
 
 #include "io/stl_reader.h"
+#include "surface/iso_surface.h"
 
 #include <cstddef>
+#include <vector>
 
 namespace cslc {
 
@@ -12,6 +14,7 @@ struct CurvatureSummary {
 };
 
 CurvatureSummary computePhase0CurvatureSummary(const TriangleMesh& mesh);
+std::vector<double> computeMeanCurvature(const IsoMesh& mesh);
+double maxAbsMeanCurvature(const std::vector<double>& values);
 
 }  // namespace cslc
-
