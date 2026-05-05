@@ -33,6 +33,7 @@ struct ModelReport {
     double sdf_ms = 0.0;
     double laplacian_ms = 0.0;
     double poisson_ms = 0.0;
+    double smoothing_ms = 0.0;
     double iso_surface_ms = 0.0;
     double peak_rss_mb = 0.0;
     std::size_t iso_vertices = 0;

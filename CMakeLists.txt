@@ -57,6 +57,7 @@ add_library(curved_slicer_phase0
     src/field/kuka_projection.cpp
     src/field/laplacian.cpp
     src/field/poisson.cpp
+    src/field/field_smoothing.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp

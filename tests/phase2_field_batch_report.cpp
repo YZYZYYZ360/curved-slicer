@@ -53,24 +53,44 @@ int main(int argc, char** argv)
 {
     try {
         const std::filesystem::path root = sourceRoot();
-        cslc::PipelineConfig config = cslc::loadPipelineConfig(root / "config" / "batch_three_models.toml");
-        std::string requested_model;
-        std::string pipeline = config.algorithm.pipeline;
-        if (argc > 1) {
-            const std::string first = argv[1];
-            if (isPipelineName(first)) {
-                pipeline = first;
-            } else if (first != "all") {
-                requested_model = first;
+
+        // Scan argv for --config <path>
+        std::filesystem::path config_path;
+        bool user_specified_config = false;
+        for (int i = 1; i < argc - 1; ++i) {
+            if (std::string(argv[i]) == "--config") {
+                config_path = std::filesystem::path(argv[i + 1]);
+                user_specified_config = true;
+                break;
             }
         }
-        if (argc > 2) {
-            pipeline = argv[2];
+        if (!user_specified_config) {
+            config_path = root / "config" / "batch_three_models.toml";
+        }
+
+        cslc::PipelineConfig config = cslc::loadPipelineConfig(config_path);
+
+        // Parse remaining positional args (model_name, pipeline), skipping --config and its path
+        std::string requested_model;
+        std::string pipeline = config.algorithm.pipeline;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--config") {
+                ++i; // skip the path that follows
+                continue;
+            }
+            if (isPipelineName(arg)) {
+                pipeline = arg;
+            } else if (arg != "all" && requested_model.empty()) {
+                requested_model = arg;
+            }
         }
         require(isPipelineName(pipeline), "pipeline should be scalar or vector_kuka");
 
         config.algorithm.pipeline = pipeline;
-        config.io.output_root = root / "runs" / (pipeline == "scalar" ? "phase2_scalar" : "phase3_vector_kuka");
+        if (!user_specified_config) {
+            config.io.output_root = root / "runs" / (pipeline == "scalar" ? "phase2_scalar" : "phase3_vector_kuka");
+        }
         config.io.debug_dump_intermediates = true;
         config.voxel.spacing_mm = 0.5;
         config.voxel.padding_mm = 0.0;
