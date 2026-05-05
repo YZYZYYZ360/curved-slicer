@@ -384,3 +384,379 @@ C++ Phase 3 输出**仍然是 STL + metrics.json + φ PLY**（与 Phase 2 同 sc
 ---
 
 *v4 §6 修订：从"逐体素 6 自由度 IK 投影"简化为"hemisphere clamp + 委托 MATLAB"。本质是把 v3 §2.3 中 60% 的复杂度移到 MATLAB（已实现），保留 C++ 中真正与曲面层算法相关的 40%（hemisphere 投影 + 非均匀 BC）。*
+
+---
+
+## §7 G 场平滑预处理：解决高频几何模型 Poisson 不收敛（2026-04-29 四次修订）
+
+### §7.1 决策背景
+
+D20 mao_rescaled 测试结果（2026-04-29，CLI #2 执行）：
+
+| 模型 | 体素 | Poisson IC-CG 收敛 | 最终 error | 备注 |
+|---|---:|---|---|---|
+| armadillo_flat | 61K | ✅ | < 1e-6 | 通过 |
+| bunny | 170K | ✅ | < 1e-6 | 通过 |
+| **mao_rescaled (0.7x)** | **195K** | ❌ **停滞在 ~0.02** | 0.0204 | **关键判别** |
+| mao 原版 | 568K | ❌ 跑满 500 迭代 | 不可见 | — |
+
+**关键观察**：mao_rescaled 体素数 (195K) 比 bunny (170K) 多 25K 却不收敛，**纯规模假设破产**（v4 §6 §6.6 已注明的根因 A 不成立）。坐实根因 B：**mao 模型的高频几何特征**（发丝、眉毛、嘴部细节）在 hemisphere clamp 后产生局部 G 不连续，div_G 含高频成分，IC-CG 预条件子对高频残差不起作用。
+
+迭代误差轨迹（mao_rescaled）：
+```
+iter=50  error=0.344041  ← 起点
+iter=100 error=0.10946   ← 下降 68%
+iter=150 error=0.0472637 ← 下降 57%
+iter=200 error=0.0254715 ← 下降 46%（低频快速消除）
+iter=250 error=0.0266632 ← 几乎不动
+iter=300 error=0.0240076 ← 几乎不动
+iter=350 error=0.0244061 ← 几乎不动
+iter=400 error=0.0221289 ← 几乎不动
+iter=450 error=0.0224022 ← 几乎不动
+iter=500 error=0.0204361 ← 几乎不动（高频卡死）
+```
+
+前 200 次清掉低频（每段 -50%~-66%），后 300 次卡在高频残差（每段 -5%）。
+
+### §7.2 解决方案：G_clamped 低通平滑预处理
+
+在 `projectToHemisphere` 之后、`solvePoisson` 之前，插入一步 **G 场低通平滑**：用 6 邻居加权平均把 G 场的高频成分抹掉，让 div_G 变成低频场，IC-CG 预条件子能高效收敛。
+
+**算法**：
+```
+对每个 occupied voxel：
+  if 该 voxel 是 BC 体素（fixed_indices 中的体素）:
+    G'(voxel) = G(voxel)                              # BC 体素不平滑
+  else:
+    sum = G(voxel) * w_center
+    count = w_center
+    for 6 个邻居 in {±x, ±y, ±z}:
+      if neighbor occupied 且 不在 BC:
+        sum += G(neighbor) * w_neighbor
+        count += w_neighbor
+    G'(voxel) = normalize(sum / count)                # 加权平均后再归一化保持单位向量
+
+可重复执行 N 次（N 越大平滑越强）
+```
+
+参数：
+- `w_center`：中心权重（默认 1.0）
+- `w_neighbor`：邻居权重（默认 1.0；调小到 0.5 让中心更受偏向）
+- `passes`：平滑次数（默认 1 次）。每次抹掉一个 voxel 尺度的高频；2-3 次足以应对 mao 的发丝细节
+- BC 体素不参与平滑——保持顶面/底面 BC 锚定
+
+**为什么有效**：
+- div_G 是 G 的一阶导数，G 平滑则 ∇·G 也平滑
+- 平滑后的 G 在尖锐特征处的不连续被"晕开"，覆盖到 1-2 个 voxel 范围
+- IC-CG 预条件子对低频残差有效，收敛率恢复
+
+**为什么不破坏算法语义**：
+- BC（顶/底面方向钉定）保留——平滑只动 BC 之间的体素
+- 平滑量 ≤ 1-2 个 voxel = 0.5-1mm 几何精度损失，远小于 layer_thickness（0.8mm）
+- hemisphere clamp 已保证 G_z > 0.05，平滑不会让 G 跨越上下半球
+
+### §7.3 接口设计
+
+新增文件：`src/field/field_smoothing.h` + `.cpp`
+
+```cpp
+namespace cslc {
+
+struct SmoothingParams {
+    int passes = 1;            // 平滑次数；建议 1-3
+    double center_weight = 1.0;
+    double neighbor_weight = 1.0;
+    bool preserve_bc = true;   // BC 体素是否保持（默认是）
+};
+
+VectorField smoothVectorField(const VoxelGrid& grid,
+                                const VectorField& field,
+                                const LaplacianVectorBC& bc,
+                                const SmoothingParams& params);
+
+}
+```
+
+### §7.4 pipeline.cpp vector_kuka 流水线（更新）
+
+```
+read STL → voxelize → buildSDF
+        → generateVectorBC
+        → solveLaplacianVector
+        → projectToHemisphere
+        → smoothVectorField              ← 【v4 §7 新增】
+        → solvePoisson
+        → gaugeShiftPhi
+        → planIsoLevels → MC → metrics
+```
+
+config 新增节：
+```toml
+[algorithm.field.smoothing]
+passes          = 1
+center_weight   = 1.0
+neighbor_weight = 1.0
+preserve_bc     = true
+```
+
+默认 passes=1 兼顾性能与效果。如果 mao 仍不收敛，CLI #1 决策提到 2 或 3。
+
+### §7.5 验收
+
+按以下顺序测试：
+
+1. **mao_rescaled passes=1**：Poisson 应收敛到 < 1e-6（500 迭代内，即至少前 200 次的 66% 下降速率延续到 100% 收敛）
+2. 如果 passes=1 仍不收敛（残差 > 0.005）：升级到 passes=2 重测
+3. 如果 passes=2 也不收敛：CLI #1 决策升级到 passes=3 或考虑其他方案
+4. **passes 确定后跑 mao 原版**：验证规模+几何叠加场景
+5. **回归测试 armadillo + bunny**：确认 passes=1 不破坏已收敛的两个模型（M1 / per-model cc / per-layer cc 不劣化超 5%）
+
+### §7.6 论文叙事
+
+§7 增加的 G 平滑步骤可以在论文里写成"low-pass pre-conditioner for Poisson convergence on geometrically high-frequency models"。这是工程优化，**不是核心算法贡献**——核心算法仍是 Laplacian + Hemisphere + Poisson 三步。
+
+---
+
+*v4 §7 修订：在 §6 基础上加一步轻量 G 场平滑（6 邻居加权平均，1-3 次），解决 mao 类高频几何模型的 Poisson 不收敛问题。BC 体素不动，平滑量限制在 1-2 voxel 范围，不损伤算法精度。*
+
+### §7.7 v4 §7 实施结果：方案证伪（2026-04-29）
+
+CLI #2 实施 v4 §7 后，对 mao_rescaled 做 passes ∈ {1, 4, 8, 16} 扫描实验。结果：
+
+| iter | passes=0 (无平滑) | passes=1 | passes=4 | passes=8 | passes=16 |
+|---:|---:|---:|---:|---:|---:|
+| 50  | 0.34404 | 0.34476 | 0.34595 | 0.34699 | 0.34842 |
+| 200 | 0.02547 | 0.02549 | 0.02555 | 0.02562 | 0.02571 |
+| 500 | 0.02044 | 0.02046 | 0.02052 | 0.02059 | 0.02069 |
+
+**结论**：G 场平滑对 Poisson 收敛**完全无效**，passes=1 到 16 误差几乎不变（甚至每 doubling 微升 0.1%）。所有 5 组的收敛轨迹形状完全相同——前 200 次迭代清掉低频（每段 -50%~-66%），后 300 次卡在高频残差（每段 -5%）。
+
+**根因重新认定**：问题**不在 G 场高频内容**，**在 Poisson 离散矩阵本身的条件数**。
+- 微升原因：smoothing 减小 ||∇·G||，相对残差 ||A·x - b|| / ||b|| 中分母变小，比值反而上升，绝对残差几乎不变
+- 矩阵条件数恶劣的来源：稀疏域（mao 195K occupied 在 1.3M 总体素中）+ 单 anchor Dirichlet（仅 1 个体素钉死）+ 自由 Neumann 边界 → IC-CG 预条件子无法处理
+
+**v4 §7 方案废止**。`field_smoothing.{h,cpp}` 模块代码保留（实现正确，未来如果要用做正则化可以复用），但**默认 passes=0**（关闭），pipeline 也加个 if 在 passes=0 时跳过调用。
+
+**剩余路径**：
+- v4 §8（下面）：放宽 Poisson tolerance，工程妥协
+- 长期路径（Phase 5+）：引入 AMG（Algebraic Multigrid）或 Hypre 作为 Poisson 预条件子，能根治高频残差
+
+---
+
+## §8 Poisson tolerance 务实放宽（2026-04-29 五次修订）
+
+### §8.1 决策背景
+
+v4 §7 证伪后，确认 mao 类高频几何模型在 IC-CG + 单 anchor Dirichlet 下**理论上**无法收敛到 1e-6。剩余两条路：
+
+| 路径 | 工作量 | 收益 | 适合时机 |
+|---|---|---|---|
+| **A. 引入 AMG 预条件子** | 高（需要 AMGCL / Hypre 第三方依赖 + 较复杂的 setup） | 根治 | Phase 5 论文实验时如有余力再做 |
+| **B. 放宽 tolerance**（本节） | 极低（一个 config 数字改动） | 工程可用 | **当前阶段必选**，让 Phase 3 三模型收尾 |
+
+选 B。
+
+### §8.2 数值依据
+
+mao_rescaled 数据：
+- IC-CG 在 iter=200 附近达到 error ≈ 0.025
+- 之后 error 在 0.020-0.027 之间振荡，几乎不下降
+- iter=500 终态 error = 0.0204
+
+新 tolerance 选 **0.03**：
+- 略高于当前最优 0.02，给求解器留一点余量保证健壮收敛
+- 对应 iter ≈ 200 即可达成（耗时 ~70s 而非 168s）
+- 对 φ 场的影响：相对残差 0.03 = 平均误差 ≤ 3%，对等值面位置影响 < 1 个 voxel = 0.5mm，远小于 layer_thickness 0.8mm，不影响后续切片
+
+### §8.3 接口与配置
+
+`PoissonParams.tolerance` 字段不变，仍由 toml 配置。修改：
+- `config/batch_three_models.toml` 与 `config/mao_rescaled.toml`：vector_kuka 路径下 `[algorithm.field.poisson] tolerance = 0.03`
+- scalar 路径**保持** tolerance=1e-6（标量 Laplacian 用纯 Dirichlet BC，矩阵条件数好，IC-CG 能严格收敛）
+- 因此 toml 实际上需要分文件设置，或者通过 pipeline 名字自动选择 tolerance（约定俗成 vector_kuka 用 0.03，scalar 用 1e-6）
+
+简化方案：直接把 toml 的 `tolerance` 字段改成 0.03，scalar 与 vector_kuka 共用（scalar 反正能收敛到 1e-6 也能更早收敛到 0.03，无害）。
+
+### §8.4 Phase 3 验收（最终）
+
+修改 tolerance 后跑：
+- mao_rescaled vector_kuka：应在 iter ~200 内收敛
+- mao 原版 vector_kuka：可能 iter ~300 收敛（规模更大，但容差宽，应能跑通）
+- armadillo + bunny vector_kuka：原本就严格收敛，0.03 容差更宽松，应秒收敛
+- 所有指标（per-model cc、M1、M2、layer_count、face_count）回归对照 Phase 2 + 之前 Phase 3 数据，不应有明显劣化
+
+**Phase 3 收尾验收清单**（CLI #1 钦定）：
+- [ ] 三模型 vector_kuka 全部跑完不崩
+- [ ] mao 原版完整 metrics.json 出炉（含 per-model cc、M1、M2、layer_count、face_count_total）
+- [ ] armadillo 与 bunny 在 tolerance=0.03 下跑通且各项指标不劣化超 5%（vs tolerance=1e-6 之前结果）
+- [ ] docs/Phase3.md 正式收尾文档落地
+- [ ] git commit 拆分清晰（[phase3-D21-smoothing-disable]、[phase3-D22-tolerance-relax]、[phase3-summary]）
+
+### §8.5 论文叙事
+
+§8 在论文中的写法："our IC-CG-based Poisson solver achieves a relative residual ≤ 3% on geometrically complex models with high-frequency surface features (e.g., the Mao bust). Tighter convergence requires multigrid preconditioning, which is left as future work."
+
+这是诚实且可信的限制说明。3% 残差在物理打印中完全可接受（layer thickness 0.8mm × 3% = 0.024mm = 24 微米，远小于喷头分辨率）。
+
+### §8.6 v4 §7 模块的处理
+
+field_smoothing.{h,cpp} 模块代码保留（实现正确）但默认 passes=0 关闭：
+
+- `pipeline.cpp` 在 passes <= 0 时跳过调用 `smoothVectorField`，跳过 stdout 日志，smoothing_ms = 0
+- `config/*.toml` 默认 `passes = 0`（v4 §7 实验完后默认关闭）
+- 模块仍编译进二进制（CMakeLists 不改），方便后续如有正则化需求复用
+
+---
+
+*v4 §8 修订：v4 §7 G 平滑方案证伪后，工程务实选择放宽 Poisson tolerance 0.03，让三模型 vector_kuka 全部收尾。AMG 升级留给 Phase 5。论文叙事保持诚实，残差物理意义明确。*
+
+### §8.7 v4 §8 实施结果：方案再次证伪（2026-04-29）
+
+CLI #2 实施 tolerance=0.03 后实测 mao_rescaled：
+
+| 指标 | 数值 | 评估 |
+|---|---|---|
+| Poisson 收敛 | iter=169, error=0.0297221 | ✅ 算"收敛" |
+| **phi_min** | **-20.7007** | ❌ |
+| phi_max_pre_shift | ~20.8 | ✅ |
+| phi_range | 41.5016 | ✅ 量级合理 |
+| **负值漂移** | **49.9% > 10% 闸门** | ❌ D10' 不通过 |
+
+**关键发现**：tolerance=0.03 的"收敛"是**假收敛**。CG 残差 0.03 在条件数差的 Poisson 矩阵上对应 solution error 量级 ~10mm（条件数 κ ≈ 10³ × tolerance × ||b|| 量级）。phi anchor 仍 = 0（hard-coded 在矩阵 row 里强制），但其他地方 φ 跌到 -20mm，等值面会从"伪深井"区域抽出无物理意义的层。
+
+**v4 §8 整节废止**。tolerance 放宽不是工程妥协，是数据上行不通的方案。
+
+**根因升级到第三层**：
+- 第一层（v4 §6 §6.6）：以为是规模问题 → mao_rescaled 195K 也不收敛，证伪
+- 第二层（v4 §7）：以为是 G 高频问题 → 平滑 16 pass 无效果，证伪
+- **第三层（v4 §9 下面）**：是 Poisson **离散系统的条件数**——单 Dirichlet anchor + 自由 Neumann 边界在大型稀疏域上条件数 κ ~ N（系统规模），IC-CG 预条件子无法处理
+
+---
+
+## §9 多 anchor Dirichlet 重构 Poisson 边界条件（2026-04-29 六次修订）
+
+### §9.1 决策背景
+
+v4 §8 证伪后，确认 Poisson 矩阵条件数本身是瓶颈。三个 plan B 候选：
+
+| 方案 | 工作量 | 收益 | 风险 |
+|---|---|---|---|
+| **A. 多 anchor Dirichlet（本节）** | 中（API 改动） | 条件数下降 ~N 倍，CG 严格收敛 | 微弱过约束，但语义自洽 |
+| B. AMG 多重网格 | 高（第三方依赖 + setup） | 根治 | Phase 5 时机更合适 |
+| C. mao 用 scalar pipeline shipping | 极低 | 工程出货 | mao 失去 vector_kuka 算法演示 |
+
+选 A。
+
+### §9.2 算法依据
+
+当前 Poisson 离散：
+```
+矩阵 A: 195K x 195K, 7-point Laplacian, 单 anchor row = identity
+RHS:    b = -∫∇·G_clamped, anchor row = 0
+```
+条件数 κ(A) ~ N （证明：单 Dirichlet 的 Poisson 在 N 维有效自由度下，最小特征值 ~ 1/N²，最大特征值 ~ O(1)）。
+
+改为多 anchor：
+```
+矩阵 A': anchor 集合 D（数千体素）每行 = identity，其他行不变
+RHS:     b' = -∫∇·G_clamped, D 中每行 = 0
+```
+条件数 κ(A') ~ N / |D|（证明：|D| 个 Dirichlet 把有效自由度降到 N - |D|，最小特征值上升到 1/(N-|D|)² 量级）。
+对 mao_rescaled：|D| ≈ 1500 底面体素，κ 从 ~195K 降到 ~130，**降 1500 倍**。
+
+### §9.3 anchor 集合的来源
+
+`generateVectorBC` 已经标记了底面体素（`fixed_vectors[i] == +print_direction`，即统一指向 +Z 的那一批）。直接复用：
+
+```cpp
+// pipeline.cpp vector_kuka 分支：
+LaplacianVectorBC bc = generateVectorBC(grid, sdf, config.field_boundary);
+// ... Laplacian + clamp ...
+
+// 提取底面 BC 集合给 Poisson 作 Dirichlet anchor
+PoissonParams pp = config.algorithm.field.poisson;
+const Vec3 print_dir = printDirection(config.field_boundary);
+for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
+    // 底面 voxel 的 fixed_vector == print_direction（容差 1e-6）
+    if (norm(bc.fixed_vectors[i] - print_dir) < 1e-6) {
+        pp.anchor_voxels.push_back(bc.fixed_indices[i]);
+        pp.anchor_values.push_back(0.0);
+    }
+}
+// 顶面 BC voxel **不**作 Poisson anchor，只在 Laplacian 阶段约束 G
+
+ScalarField phi = solvePoisson(grid, smoothed, pp);
+```
+
+### §9.4 接口改动
+
+`PoissonParams`（src/field/poisson.h）：
+
+```cpp
+struct PoissonParams {
+    int max_iterations = 500;
+    double tolerance = 1e-6;          // ← 恢复严格容差（多 anchor 后矩阵条件数大幅改善）
+    bool use_precondition = true;
+    
+    // v4 §9：多 anchor Dirichlet 集合
+    std::vector<VoxelIndex> anchor_voxels;     // 替代旧的单字段 anchor_voxel
+    std::vector<double>     anchor_values;     // 与 anchor_voxels 一一对应（通常全 0）
+    
+    // 兼容字段（已弃用，仅在 anchor_voxels 为空时回退）
+    VoxelIndex anchor_voxel{0, 0, 0};
+    
+    bool log_iterations = false;
+    std::string progress_label;
+    int* out_iterations = nullptr;
+    double* out_error = nullptr;
+};
+```
+
+`solvePoisson`（src/field/poisson.cpp）：
+```cpp
+// 构造 anchor 行集合
+std::unordered_map<int, double> anchor_rows;  // row -> phi value
+if (!params.anchor_voxels.empty()) {
+    for (std::size_t i = 0; i < params.anchor_voxels.size(); ++i) {
+        const std::size_t key = grid.index(...);
+        if (auto it = rows.find(key); it != rows.end()) {
+            anchor_rows[it->second] = params.anchor_values[i];
+        }
+    }
+} else {
+    // 回退到单 anchor 模式
+    const std::size_t key = grid.index(params.anchor_voxel...);
+    if (auto it = rows.find(key); it != rows.end()) {
+        anchor_rows[it->second] = 0.0;
+    }
+}
+
+// 装配矩阵：anchor_rows 中的 row 用 identity；其他用 7-point Laplacian
+for (int row = 0; row < n; ++row) {
+    if (auto it = anchor_rows.find(row); it != anchor_rows.end()) {
+        triplets.emplace_back(row, row, 1.0);
+        rhs[row] = it->second;
+        continue;
+    }
+    // ... 7-point Laplacian + RHS = -∫∇·G ...
+    // 注意：邻居是 anchor 时，rhs 累加 -coefficient * anchor_value（已经被移到右侧）
+}
+```
+
+### §9.5 验收标准
+
+修改后跑：
+- mao_rescaled vector_kuka tolerance=1e-6（恢复严格）：iter ≤ 200 严格收敛，phi_min ≥ -1e-3，gauge 三闸门全过
+- mao 原版 vector_kuka tolerance=1e-6：iter ≤ 400 严格收敛，gauge 三闸门全过
+- armadillo + bunny vector_kuka tolerance=1e-6：秒收敛（< 50 iter），指标不劣化超 5%
+- scalar 路径不受影响（标量 Laplacian 本来就用多 Dirichlet）
+
+如果 mao 原版仍不收敛：CLI #1 做 plan B 决策（AMG 第三方库引入 / mao 单独 spacing=1.0mm / mao 用 scalar 路径 shipping）。
+
+### §9.6 论文叙事
+
+§9 在论文中可以不单独提（属于工程实现细节），或者在 implementation 章节用一句话："we anchor the entire bottom boundary as Dirichlet rather than a single voxel, dramatically improving conditioning of the Poisson system."
+
+---
+
+*v4 §9 修订：彻底改造 Poisson 边界条件，从单 anchor 升级到底面整体 Dirichlet。条件数从 ~N 降到 ~N/|D|（约 1500 倍），让 IC-CG 在严格容差下收敛。这是 §6→§7→§8 三轮证伪之后的真正解。*
