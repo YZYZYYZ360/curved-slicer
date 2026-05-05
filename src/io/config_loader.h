@@ -3,6 +3,7 @@
 #include "field/laplacian.h"
 #include "field/kuka_projection.h"
 #include "field/poisson.h"
+#include "field/field_smoothing.h"
 #include "geometry/voxel_grid.h"
 
 #include <array>
@@ -27,6 +28,7 @@ struct IoConfig {
 struct AlgorithmFieldConfig {
     LaplacianParams laplacian;
     PoissonParams poisson;
+    SmoothingParams smoothing;
 };
 
 struct AlgorithmConfig {

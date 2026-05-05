@@ -14,7 +14,14 @@ struct PoissonParams {
     int max_iterations = 500;
     double tolerance = 1e-6;
     bool use_precondition = true;
+
+    // v4 §9：多 Dirichlet anchor
+    std::vector<VoxelIndex> anchor_voxels;
+    std::vector<double>     anchor_values;
+
+    // 兼容字段（旧的单 anchor），仅在 anchor_voxels 为空时回退
     VoxelIndex anchor_voxel{0, 0, 0};
+
     bool log_iterations = false;
     std::string progress_label;
     int* out_iterations = nullptr;

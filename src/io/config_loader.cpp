@@ -328,6 +328,12 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readBool(poisson, "use_precondition", config.algorithm.field.poisson.use_precondition);
     readVoxelIndex(poisson, "anchor_voxel", config.algorithm.field.poisson.anchor_voxel);
 
+    const toml::table* smoothing = tableAt(root, {"algorithm", "field", "smoothing"});
+    readInt(smoothing, "passes", config.algorithm.field.smoothing.passes);
+    readDouble(smoothing, "center_weight", config.algorithm.field.smoothing.center_weight);
+    readDouble(smoothing, "neighbor_weight", config.algorithm.field.smoothing.neighbor_weight);
+    readBool(smoothing, "preserve_bc", config.algorithm.field.smoothing.preserve_bc);
+
     const toml::table* iso_surface = tableAt(root, {"iso_surface"});
     readDouble(iso_surface, "layer_thickness_mm", config.iso_surface.layer_thickness_mm);
     readString(iso_surface, "iso_spacing", config.iso_surface.iso_spacing);

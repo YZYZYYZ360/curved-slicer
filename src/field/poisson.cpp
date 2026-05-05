@@ -94,20 +94,38 @@ ScalarField solvePoisson(const VoxelGrid& grid, const VectorField& field, const 
         throw std::runtime_error("solvePoisson requires a non-empty occupied grid");
     }
     const auto rows = buildRowMap(grid, voxels);
-    const std::size_t requested_anchor_key =
-        grid.index(params.anchor_voxel.x, params.anchor_voxel.y, params.anchor_voxel.z);
-    const auto requested_anchor = rows.find(requested_anchor_key);
-    const int anchor_row = requested_anchor != rows.end() ? requested_anchor->second : 0;
     const int n = static_cast<int>(voxels.size());
+
+    // v4 §9: 构造 anchor 行集合
+    std::unordered_map<int, double> anchor_rows;  // row -> phi value
+    if (!params.anchor_voxels.empty()) {
+        for (std::size_t i = 0; i < params.anchor_voxels.size(); ++i) {
+            const VoxelIndex& voxel = params.anchor_voxels[i];
+            const std::size_t key = grid.index(voxel.x, voxel.y, voxel.z);
+            if (auto it = rows.find(key); it != rows.end()) {
+                anchor_rows[it->second] = params.anchor_values[i];
+            }
+        }
+    } else {
+        // 回退到单 anchor 模式
+        const std::size_t key = grid.index(params.anchor_voxel.x, params.anchor_voxel.y, params.anchor_voxel.z);
+        if (auto it = rows.find(key); it != rows.end()) {
+            anchor_rows[it->second] = 0.0;
+        }
+    }
+    if (anchor_rows.empty()) {
+        throw std::runtime_error("solvePoisson requires at least one anchor voxel");
+    }
 
     std::vector<Triplet> triplets;
     triplets.reserve(static_cast<std::size_t>(n) * 7);
     Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n);
 
     for (int row = 0; row < n; ++row) {
-        if (row == anchor_row) {
+        // v4 §9: anchor 行用 identity
+        if (auto it = anchor_rows.find(row); it != anchor_rows.end()) {
             triplets.emplace_back(row, row, 1.0);
-            rhs[row] = 0.0;
+            rhs[row] = it->second;
             continue;
         }
 
@@ -117,6 +135,7 @@ ScalarField solvePoisson(const VoxelGrid& grid, const VectorField& field, const 
 
         double diagonal = 0.0;
         double target_sum = 0.0;
+        double anchor_rhs = 0.0;
         for (const auto& offset : kNeighbors) {
             const int nx = voxel.x + offset[0];
             const int ny = voxel.y + offset[1];
@@ -140,13 +159,16 @@ ScalarField solvePoisson(const VoxelGrid& grid, const VectorField& field, const 
             target_sum += dot(edge_vector, delta);
 
             ++diagonal;
-            if (neighbor_row->second != anchor_row) {
+            // v4 §9: 邻居是 anchor 时，把贡献移到 RHS
+            if (auto anchor_it = anchor_rows.find(neighbor_row->second); anchor_it != anchor_rows.end()) {
+                anchor_rhs += anchor_it->second;
+            } else {
                 triplets.emplace_back(row, neighbor_row->second, -1.0);
             }
         }
 
         triplets.emplace_back(row, row, diagonal > 0.0 ? diagonal : 1.0);
-        rhs[row] = -target_sum;
+        rhs[row] = -target_sum + anchor_rhs;
     }
 
     SparseMatrix matrix(n, n);

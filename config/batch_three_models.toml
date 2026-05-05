@@ -44,6 +44,12 @@ max_iterations   = 500
 tolerance        = 1e-6
 use_precondition = true
 
+[algorithm.field.smoothing]
+passes          = 0
+center_weight   = 1.0
+neighbor_weight = 1.0
+preserve_bc     = true
+
 [iso_surface]
 layer_thickness_mm = 0.8
 iso_spacing        = "uniform"
