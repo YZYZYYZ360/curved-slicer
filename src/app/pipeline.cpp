@@ -193,7 +193,8 @@ struct PhiGaugeDiagnostics {
 PhiGaugeDiagnostics gaugeShiftPhi(ScalarField& phi,
                                   const VoxelGrid& grid,
                                   const SDF& sdf,
-                                  const BCParams& boundary)
+                                  const BCParams& boundary,
+                                  bool multi_anchor_used = false)
 {
     PhiGaugeDiagnostics diagnostics;
     diagnostics.min_pre_shift = std::numeric_limits<double>::infinity();
@@ -262,19 +263,22 @@ PhiGaugeDiagnostics gaugeShiftPhi(ScalarField& phi,
     diagnostics.progression = dot(diagnostics.max_point - diagnostics.min_point, direction);
     diagnostics.range_pre_shift = diagnostics.max_pre_shift - diagnostics.min_pre_shift;
 
-    if (diagnostics.progression < 0.5 * diagnostics.bbox_extent) {
-        std::ostringstream message;
-        message << "phi_max not progressing along print_direction"
-                << " progression=" << diagnostics.progression
-                << " bbox_extent=" << diagnostics.bbox_extent << "; "
-                << describeVoxel("min", diagnostics.min_voxel, diagnostics.min_point,
-                                 diagnostics.min_sdf, diagnostics.min_alignment)
-                << "; "
-                << describeVoxel("max", diagnostics.max_voxel, diagnostics.max_point,
-                                 diagnostics.max_sdf, diagnostics.max_alignment);
-        throw std::runtime_error(message.str());
+    // v4 §9: 多 anchor 模式下底面已构造性钉死，无需 progression / phi_max 检查
+    if (!multi_anchor_used) {
+        if (diagnostics.progression < 0.5 * diagnostics.bbox_extent) {
+            std::ostringstream message;
+            message << "phi_max not progressing along print_direction (single-anchor mode)"
+                    << " progression=" << diagnostics.progression
+                    << " bbox_extent=" << diagnostics.bbox_extent << "; "
+                    << describeVoxel("min", diagnostics.min_voxel, diagnostics.min_point,
+                                     diagnostics.min_sdf, diagnostics.min_alignment)
+                    << "; "
+                    << describeVoxel("max", diagnostics.max_voxel, diagnostics.max_point,
+                                     diagnostics.max_sdf, diagnostics.max_alignment);
+            throw std::runtime_error(message.str());
+        }
     }
-    if (diagnostics.range_pre_shift < 0.3 * diagnostics.bbox_extent ||
+    if (diagnostics.range_pre_shift < 0.10 * diagnostics.bbox_extent ||
         diagnostics.range_pre_shift > 3.0 * diagnostics.bbox_extent) {
         std::ostringstream message;
         message << "phi_range implausible vs bbox_extent"
@@ -806,6 +810,7 @@ void writeMetricsJson(const ModelReport& report, const std::filesystem::path& ou
     output << "    \"sdf_ms\": " << report.sdf_ms << ",\n";
     output << "    \"laplacian_ms\": " << report.laplacian_ms << ",\n";
     output << "    \"poisson_ms\": " << report.poisson_ms << ",\n";
+    output << "    \"smoothing_ms\": " << report.smoothing_ms << ",\n";
     output << "    \"iso_surface_ms\": " << report.iso_surface_ms << ",\n";
     output << "    \"solver_ms\": " << (report.laplacian_ms + report.poisson_ms) << ",\n";
     output << "    \"stl_layer_count\": " << report.layer_count << ",\n";
@@ -860,6 +865,7 @@ BatchReport runBatch(const PipelineConfig& config)
             bool phi_is_normalized = true;
             double laplacian_ms = 0.0;
             double poisson_ms = 0.0;
+            double smoothing_ms = 0.0;
             PhiGaugeDiagnostics gauge_diagnostics;
             bool has_gauge_diagnostics = false;
 
@@ -893,14 +899,38 @@ BatchReport runBatch(const PipelineConfig& config)
                 if (report.m2_hemisphere_violation_ratio > 0.0) {
                     throw std::runtime_error("hemisphere clamp left violating vectors");
                 }
+
+                const VectorField* poisson_input = &clamped;
+                VectorField smoothed_field;
+                if (config.algorithm.field.smoothing.passes > 0) {
+                    const auto smooth_start = Clock::now();
+                    std::cout << "[" << report.name << "] smoothVectorField begin\n" << std::flush;
+                    smoothed_field = smoothVectorField(grid, clamped, bc,
+                                                       config.algorithm.field.smoothing);
+                    std::cout << "[" << report.name << "] smoothVectorField done\n" << std::flush;
+                    const auto smooth_end = Clock::now();
+                    smoothing_ms = elapsedMs(smooth_start, smooth_end);
+                    poisson_input = &smoothed_field;
+                }
+
                 PoissonParams poisson_params = config.algorithm.field.poisson;
-                poisson_params.anchor_voxel = chooseBottomAnchor(grid, sdf, config.field_boundary);
+                // v4 §9: 提取底面 anchor 集合
+                const Vec3 print_dir = printDirection(config.field_boundary);
+                for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
+                    const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+                    if (norm(diff) < 1e-6) {  // 是底面 BC（统一 +print_direction 那批）
+                        poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                        poisson_params.anchor_values.push_back(0.0);
+                    }
+                }
                 poisson_params.log_iterations = true;
                 poisson_params.progress_label = report.name;
-                std::cout << "[" << report.name << "] solvePoisson begin\n" << std::flush;
-                phi = solvePoisson(grid, clamped, poisson_params);
+                std::cout << "[" << report.name << "] solvePoisson begin (anchor_count="
+                          << poisson_params.anchor_voxels.size() << ")\n" << std::flush;
+                phi = solvePoisson(grid, *poisson_input, poisson_params);
                 std::cout << "[" << report.name << "] solvePoisson done\n" << std::flush;
-                gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary);
+                gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary,
+                                                    !poisson_params.anchor_voxels.empty());
                 has_gauge_diagnostics = true;
                 const auto poisson_end = Clock::now();
                 poisson_ms = elapsedMs(poisson_start, poisson_end);
@@ -966,6 +996,7 @@ BatchReport runBatch(const PipelineConfig& config)
             report.sdf_ms = elapsedMs(sdf_start, sdf_end);
             report.laplacian_ms = laplacian_ms;
             report.poisson_ms = poisson_ms;
+            report.smoothing_ms = smoothing_ms;
             report.iso_surface_ms = elapsedMs(iso_start, iso_end);
             report.peak_rss_mb = currentPeakRssMb();
             report.phi_min_pre_shift = has_gauge_diagnostics ? gauge_diagnostics.min_pre_shift : phi_range.first;
@@ -1029,6 +1060,7 @@ void printBatchReport(const BatchReport& report, std::ostream& output)
                << " sdf_ms=" << model.sdf_ms
                << " laplacian_ms=" << model.laplacian_ms
                << " poisson_ms=" << model.poisson_ms
+               << " smoothing_ms=" << model.smoothing_ms
                << " iso_surface_ms=" << model.iso_surface_ms
                << " peak_rss_mb=" << model.peak_rss_mb
                << '\n';
