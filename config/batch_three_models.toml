@@ -51,7 +51,7 @@ neighbor_weight = 1.0
 preserve_bc     = true
 
 [iso_surface]
-layer_thickness_mm = 0.8
+layer_thickness_mm = 0.2
 iso_spacing        = "uniform"
 max_layers         = 500
 phi_start_offset   = 0.0
