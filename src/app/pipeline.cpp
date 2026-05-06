@@ -701,6 +701,136 @@ void writePhiPointCloudPly(const ScalarField& phi, const std::filesystem::path& 
     }
 }
 
+void writeVoxelOccupiedPly(const VoxelGrid& grid, const std::filesystem::path& output_path)
+{
+    const auto voxels = grid.occupiedVoxels();
+    std::filesystem::create_directories(output_path.parent_path());
+    std::ofstream output(output_path);
+    if (!output) {
+        throw std::runtime_error("Failed to open voxel PLY: " + output_path.u8string());
+    }
+    output << "ply\nformat ascii 1.0\n";
+    output << "element vertex " << voxels.size() << '\n';
+    output << "property float x\nproperty float y\nproperty float z\n";
+    output << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    output << "end_header\n";
+    for (const VoxelIndex& v : voxels) {
+        const double x = grid.bbox().min.x + (v.x + 0.5) * grid.spacing();
+        const double y = grid.bbox().min.y + (v.y + 0.5) * grid.spacing();
+        const double z = grid.bbox().min.z + (v.z + 0.5) * grid.spacing();
+        output << x << ' ' << y << ' ' << z << " 255 255 255\n";
+    }
+}
+
+void writeSdfPointsPly(const VoxelGrid& grid, const SDF& sdf, const std::filesystem::path& output_path)
+{
+    const auto voxels = grid.occupiedVoxels();
+    double min_sdf = std::numeric_limits<double>::infinity();
+    double max_sdf = -std::numeric_limits<double>::infinity();
+    for (const VoxelIndex& v : voxels) {
+        const double val = sdfValue(sdf, v.x, v.y, v.z);
+        if (std::isfinite(val)) {
+            min_sdf = std::min(min_sdf, val);
+            max_sdf = std::max(max_sdf, val);
+        }
+    }
+    const double span = std::max(1e-12, max_sdf - min_sdf);
+
+    std::filesystem::create_directories(output_path.parent_path());
+    std::ofstream output(output_path);
+    if (!output) {
+        throw std::runtime_error("Failed to open SDF PLY: " + output_path.u8string());
+    }
+    output << "ply\nformat ascii 1.0\n";
+    output << "element vertex " << voxels.size() << '\n';
+    output << "property float x\nproperty float y\nproperty float z\n";
+    output << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    output << "end_header\n";
+    for (const VoxelIndex& v : voxels) {
+        const double x = grid.bbox().min.x + (v.x + 0.5) * grid.spacing();
+        const double y = grid.bbox().min.y + (v.y + 0.5) * grid.spacing();
+        const double z = grid.bbox().min.z + (v.z + 0.5) * grid.spacing();
+        const double val = sdfValue(sdf, v.x, v.y, v.z);
+        const double t = std::max(0.0, std::min(1.0, (val - min_sdf) / span));
+        const int red = static_cast<int>(255.0 * t);
+        const int green = static_cast<int>(255.0 * (1.0 - std::abs(2.0 * t - 1.0)));
+        const int blue = static_cast<int>(255.0 * (1.0 - t));
+        output << x << ' ' << y << ' ' << z << ' '
+               << red << ' ' << green << ' ' << blue << '\n';
+    }
+}
+
+void writeBcVoxelsPly(const VoxelGrid& grid,
+                      const LaplacianVectorBC& bc,
+                      const Vec3& print_dir,
+                      const std::filesystem::path& output_path)
+{
+    std::filesystem::create_directories(output_path.parent_path());
+    std::ofstream output(output_path);
+    if (!output) {
+        throw std::runtime_error("Failed to open BC PLY: " + output_path.u8string());
+    }
+    output << "ply\nformat ascii 1.0\n";
+    output << "element vertex " << bc.fixed_indices.size() << '\n';
+    output << "property float x\nproperty float y\nproperty float z\n";
+    output << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    output << "end_header\n";
+    for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
+        const VoxelIndex& v = bc.fixed_indices[i];
+        const double x = grid.bbox().min.x + (v.x + 0.5) * grid.spacing();
+        const double y = grid.bbox().min.y + (v.y + 0.5) * grid.spacing();
+        const double z = grid.bbox().min.z + (v.z + 0.5) * grid.spacing();
+        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+        const bool is_bottom = norm(diff) < 1e-6;
+        output << x << ' ' << y << ' ' << z << ' '
+               << (is_bottom ? 255 : 0) << ' ' << 0 << ' ' << (is_bottom ? 0 : 255) << '\n';
+    }
+}
+
+void writeGFieldPly(const VoxelGrid& grid,
+                    const VectorField& field,
+                    const std::filesystem::path& output_path)
+{
+    const auto voxels = grid.occupiedVoxels();
+    const double seg_len = 0.5 * grid.spacing();
+    const Vec3 up{0.0, 0.0, 1.0};
+
+    std::filesystem::create_directories(output_path.parent_path());
+    std::ofstream output(output_path);
+    if (!output) {
+        throw std::runtime_error("Failed to open G field PLY: " + output_path.u8string());
+    }
+    const std::size_t vertex_count = voxels.size() * 2;
+    const std::size_t edge_count = voxels.size();
+    output << "ply\nformat ascii 1.0\n";
+    output << "element vertex " << vertex_count << '\n';
+    output << "property float x\nproperty float y\nproperty float z\n";
+    output << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    output << "element edge " << edge_count << '\n';
+    output << "property int vertex1\nproperty int vertex2\n";
+    output << "end_header\n";
+    for (std::size_t i = 0; i < voxels.size(); ++i) {
+        const VoxelIndex& v = voxels[i];
+        const double cx = grid.bbox().min.x + (v.x + 0.5) * grid.spacing();
+        const double cy = grid.bbox().min.y + (v.y + 0.5) * grid.spacing();
+        const double cz = grid.bbox().min.z + (v.z + 0.5) * grid.spacing();
+        const Vec3 g = field.values[grid.index(v.x, v.y, v.z)];
+        const double dot_up = dot(normalized(g), up);
+        const double t = std::max(0.0, std::min(1.0, (dot_up + 1.0) * 0.5));
+        const int red = static_cast<int>(255.0 * (1.0 - t));
+        const int green = static_cast<int>(255.0 * t);
+        const int blue = 0;
+        output << cx << ' ' << cy << ' ' << cz << ' ' << red << ' ' << green << ' ' << blue << '\n';
+        const double ex = cx + g.x * seg_len;
+        const double ey = cy + g.y * seg_len;
+        const double ez = cz + g.z * seg_len;
+        output << ex << ' ' << ey << ' ' << ez << ' ' << red << ' ' << green << ' ' << blue << '\n';
+    }
+    for (std::size_t i = 0; i < voxels.size(); ++i) {
+        output << (i * 2) << ' ' << (i * 2 + 1) << '\n';
+    }
+}
+
 void writeMetricsJson(const ModelReport& report, const std::filesystem::path& output_path)
 {
     std::filesystem::create_directories(output_path.parent_path());
@@ -935,6 +1065,17 @@ BatchReport runBatch(const PipelineConfig& config)
                 const auto poisson_end = Clock::now();
                 poisson_ms = elapsedMs(poisson_start, poisson_end);
                 phi_is_normalized = false;
+
+                // Phase 3.5: dump intermediate fields
+                if (config.io.debug_dump_intermediates) {
+                    const std::filesystem::path dump_dir = config.io.output_root / model.name;
+                    std::cout << "[" << report.name << "] dumping intermediates\n" << std::flush;
+                    writeVoxelOccupiedPly(grid, dump_dir / "voxel_occupied.ply");
+                    writeSdfPointsPly(grid, sdf, dump_dir / "sdf_points.ply");
+                    writeBcVoxelsPly(grid, bc, print_dir, dump_dir / "bc_voxels.ply");
+                    writeGFieldPly(grid, clamped, dump_dir / "g_field.ply");
+                    std::cout << "[" << report.name << "] dumping done\n" << std::flush;
+                }
             } else {
                 throw std::runtime_error("algorithm.pipeline must be scalar or vector_kuka");
             }
