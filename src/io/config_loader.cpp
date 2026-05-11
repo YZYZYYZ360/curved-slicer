@@ -314,6 +314,11 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDoubleArray3(boundary, "print_direction", config.field_boundary.print_direction);
     readDouble(boundary, "bottom_dot_threshold", config.field_boundary.bottom_dot_threshold);
     readDouble(boundary, "bottom_sdf_band", config.field_boundary.bottom_sdf_band);
+    // v4 §10: geometric_z 策略参数
+    readDouble(boundary, "bottom_band_mm", config.field_boundary.bottom_band_mm);
+    readDouble(boundary, "top_band_mm", config.field_boundary.top_band_mm);
+    readDouble(boundary, "band_min_mm", config.field_boundary.band_min_mm);
+    readDouble(boundary, "band_max_mm", config.field_boundary.band_max_mm);
 
     const toml::table* algorithm = tableAt(root, {"algorithm"});
     readString(algorithm, "pipeline", config.algorithm.pipeline);

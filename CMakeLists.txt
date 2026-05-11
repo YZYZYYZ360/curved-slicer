@@ -171,3 +171,11 @@ add_executable(phase0_io_voxel_benchmark
 )
 
 configure_phase0_test(phase0_io_voxel_benchmark)
+
+add_executable(geometric_z_bc_unit_test
+    tests/geometric_z_bc_unit_test.cpp
+)
+
+configure_phase0_test(geometric_z_bc_unit_test)
+
+add_test(NAME geometric_z_bc_unit COMMAND geometric_z_bc_unit_test)

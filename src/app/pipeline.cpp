@@ -780,8 +780,14 @@ void writeBcVoxelsPly(const VoxelGrid& grid,
         const double x = grid.bbox().min.x + (v.x + 0.5) * grid.spacing();
         const double y = grid.bbox().min.y + (v.y + 0.5) * grid.spacing();
         const double z = grid.bbox().min.z + (v.z + 0.5) * grid.spacing();
-        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
-        const bool is_bottom = norm(diff) < 1e-6;
+        // v4 §10: 优先用 bc_zones，回退到向量差判定
+        bool is_bottom;
+        if (!bc.bc_zones.empty()) {
+            is_bottom = (bc.bc_zones[i] == BCZone::Bottom);
+        } else {
+            const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+            is_bottom = norm(diff) < 1e-6;
+        }
         output << x << ' ' << y << ' ' << z << ' '
                << (is_bottom ? 255 : 0) << ' ' << 0 << ' ' << (is_bottom ? 0 : 255) << '\n';
     }
@@ -1044,13 +1050,21 @@ BatchReport runBatch(const PipelineConfig& config)
                 }
 
                 PoissonParams poisson_params = config.algorithm.field.poisson;
-                // v4 §9: 提取底面 anchor 集合
+                // v4 §9+§10: 提取底面+顶面 anchor 集合（优先 bc_zones，回退向量差）
                 const Vec3 print_dir = printDirection(config.field_boundary);
                 for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
-                    const Vec3 diff = bc.fixed_vectors[i] - print_dir;
-                    if (norm(diff) < 1e-6) {  // 是底面 BC（统一 +print_direction 那批）
+                    if (!bc.bc_zones.empty()) {
+                        // geometric_z 策略：bc_zones 明确区分底/顶
                         poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
-                        poisson_params.anchor_values.push_back(0.0);
+                        poisson_params.anchor_values.push_back(
+                            bc.bc_zones[i] == BCZone::Bottom ? 0.0 : 1.0);
+                    } else {
+                        // bottom_up 策略：向量差判定，仅底面做 anchor
+                        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+                        if (norm(diff) < 1e-6) {
+                            poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                            poisson_params.anchor_values.push_back(0.0);
+                        }
                     }
                 }
                 poisson_params.log_iterations = true;

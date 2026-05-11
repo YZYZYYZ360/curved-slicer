@@ -177,12 +177,88 @@ VectorField makeEmptyVectorField(const VoxelGrid& grid)
     return field;
 }
 
+// v4 §10: geometric_z band 自动推算
+double computeBand(const BCParams& params, double zspan)
+{
+    if (params.bottom_band_mm > 0.0) return params.bottom_band_mm;
+    return std::clamp(zspan * 0.05, params.band_min_mm, params.band_max_mm);
+}
+
+LaplacianBC generateBC_geometric_z(const VoxelGrid& grid, const BCParams& params)
+{
+    const AABB& bbox = grid.bbox();
+    const double zspan = bbox.max.z - bbox.min.z;
+    const double bot_band = computeBand(params, zspan);
+    const double top_band = params.top_band_mm > 0.0
+        ? params.top_band_mm
+        : std::clamp(zspan * 0.05, params.band_min_mm, params.band_max_mm);
+
+    LaplacianBC bc;
+    const std::vector<VoxelIndex> voxels = grid.occupiedVoxels();
+    bc.fixed_indices.reserve(voxels.size() / 5 + 1);
+    bc.fixed_values.reserve(voxels.size() / 5 + 1);
+
+    for (const VoxelIndex& voxel : voxels) {
+        const double z_world = bbox.min.z + (voxel.z + 0.5) * grid.spacing();
+        if (z_world - bbox.min.z < bot_band) {
+            bc.fixed_indices.push_back(voxel);
+            bc.fixed_values.push_back(0.0);
+        } else if (bbox.max.z - z_world < top_band) {
+            bc.fixed_indices.push_back(voxel);
+            bc.fixed_values.push_back(1.0);
+        }
+    }
+
+    if (bc.fixed_indices.empty()) {
+        throw std::runtime_error("generateBC geometric_z found no boundary voxels");
+    }
+    return bc;
+}
+
+LaplacianVectorBC generateVectorBC_geometric_z(const VoxelGrid& grid, const BCParams& params)
+{
+    const Vec3 print_direction = directionFromParams(params);
+    const AABB& bbox = grid.bbox();
+    const double zspan = bbox.max.z - bbox.min.z;
+    const double bot_band = computeBand(params, zspan);
+    const double top_band = params.top_band_mm > 0.0
+        ? params.top_band_mm
+        : std::clamp(zspan * 0.05, params.band_min_mm, params.band_max_mm);
+
+    LaplacianVectorBC bc;
+    const std::vector<VoxelIndex> voxels = grid.occupiedVoxels();
+    bc.fixed_indices.reserve(voxels.size() / 5 + 1);
+    bc.fixed_vectors.reserve(voxels.size() / 5 + 1);
+    bc.bc_zones.reserve(voxels.size() / 5 + 1);
+
+    for (const VoxelIndex& voxel : voxels) {
+        const double z_world = bbox.min.z + (voxel.z + 0.5) * grid.spacing();
+        if (z_world - bbox.min.z < bot_band) {
+            bc.fixed_indices.push_back(voxel);
+            bc.fixed_vectors.push_back(print_direction);
+            bc.bc_zones.push_back(BCZone::Bottom);
+        } else if (bbox.max.z - z_world < top_band) {
+            bc.fixed_indices.push_back(voxel);
+            bc.fixed_vectors.push_back(print_direction);
+            bc.bc_zones.push_back(BCZone::Top);
+        }
+    }
+
+    if (bc.fixed_indices.empty()) {
+        throw std::runtime_error("generateVectorBC geometric_z found no boundary voxels");
+    }
+    return bc;
+}
+
 }  // namespace
 
 LaplacianBC generateBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params)
 {
+    if (params.strategy == "geometric_z") {
+        return generateBC_geometric_z(grid, params);
+    }
     if (params.strategy != "bottom_up") {
-        throw std::runtime_error("not implemented in Phase 2");
+        throw std::runtime_error("generateBC: unknown strategy '" + params.strategy + "'");
     }
     if (grid.nx() != sdf.nx || grid.ny() != sdf.ny || grid.nz() != sdf.nz) {
         throw std::runtime_error("generateBC requires grid and SDF dimensions to match");
@@ -231,8 +307,11 @@ LaplacianBC generateBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& pa
 
 LaplacianVectorBC generateVectorBC(const VoxelGrid& grid, const SDF& sdf, const BCParams& params)
 {
+    if (params.strategy == "geometric_z") {
+        return generateVectorBC_geometric_z(grid, params);
+    }
     if (params.strategy != "bottom_up") {
-        throw std::runtime_error("not implemented in Phase 3");
+        throw std::runtime_error("generateVectorBC: unknown strategy '" + params.strategy + "'");
     }
     if (grid.nx() != sdf.nx || grid.ny() != sdf.ny || grid.nz() != sdf.nz) {
         throw std::runtime_error("generateVectorBC requires grid and SDF dimensions to match");
