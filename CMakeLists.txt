@@ -59,6 +59,7 @@ add_library(curved_slicer_phase0
     src/field/poisson.cpp
     src/field/field_smoothing.cpp
     src/kinematics/forward_kin.cpp
+    src/kinematics/ik_solver.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -81,7 +82,7 @@ endif()
 
 if(MSVC)
     target_compile_options(curved_slicer_phase0 PRIVATE /utf-8 /W4 /permissive-)
-    target_compile_definitions(curved_slicer_phase0 PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(curved_slicer_phase0 PUBLIC _USE_MATH_DEFINES UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     target_compile_options(curved_slicer_phase0 PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -92,6 +93,7 @@ function(configure_phase0_test target_name)
     target_link_libraries(${target_name} PRIVATE curved_slicer_phase0)
     target_compile_definitions(${target_name}
         PRIVATE
+            _USE_MATH_DEFINES
             CSLC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     if(MSVC)
@@ -190,3 +192,13 @@ configure_phase0_test(forward_kin_unit_test)
 target_link_libraries(forward_kin_unit_test PRIVATE Eigen3::Eigen)
 
 add_test(NAME forward_kin_unit COMMAND forward_kin_unit_test)
+
+add_executable(ik_solver_unit_test
+    tests/ik_solver_unit_test.cpp
+)
+
+configure_phase0_test(ik_solver_unit_test)
+
+target_link_libraries(ik_solver_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME ik_solver_unit COMMAND ik_solver_unit_test)
