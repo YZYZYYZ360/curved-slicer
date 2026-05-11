@@ -2,6 +2,7 @@ build/
 build_*/
 runs/
 phase0_batch_test_output/
+shortcuts/
 *.user
 *.suo
 *.VC.db
