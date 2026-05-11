@@ -58,6 +58,7 @@ add_library(curved_slicer_phase0
     src/field/laplacian.cpp
     src/field/poisson.cpp
     src/field/field_smoothing.cpp
+    src/kinematics/forward_kin.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -179,3 +180,13 @@ add_executable(geometric_z_bc_unit_test
 configure_phase0_test(geometric_z_bc_unit_test)
 
 add_test(NAME geometric_z_bc_unit COMMAND geometric_z_bc_unit_test)
+
+add_executable(forward_kin_unit_test
+    tests/forward_kin_unit_test.cpp
+)
+
+configure_phase0_test(forward_kin_unit_test)
+
+target_link_libraries(forward_kin_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME forward_kin_unit COMMAND forward_kin_unit_test)
