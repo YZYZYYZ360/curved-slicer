@@ -1,0 +1,28 @@
+&ACCESS RV
+&PARAM EDITMASK = *
+&PARAM TEMPLATE = C:\KRC\Roboter\Template\vorgabe
+DEFDAT RSI_USER PUBLIC
+
+   ;************************************************
+   ; Option Package "RobotSensorInterface"
+   ; File Version: 1.0.0
+   ;
+   ; Copyright (C) KUKA Deutschland GmbH 2018
+   ; All rights reserved.
+   ;
+   ; This KRL dat file contains RSI variables that can
+   ; be modified by the user.
+   ;************************************************
+   
+; RSI global Variables
+
+; Flag for enabling RSI messages
+GLOBAL BOOL RSIERRMSG=TRUE
+
+; Tech (1-6) Channel used for RSI corrections (only in Mode:#IPO)
+GLOBAL INT RSITECHIDX=1
+
+; End RSI global Variables
+
+
+ENDDAT

@@ -760,3 +760,1065 @@ for (int row = 0; row < n; ++row) {
 ---
 
 *v4 §9 修订：彻底改造 Poisson 边界条件，从单 anchor 升级到底面整体 Dirichlet。条件数从 ~N 降到 ~N/|D|（约 1500 倍），让 IC-CG 在严格容差下收敛。这是 §6→§7→§8 三轮证伪之后的真正解。*
+
+---
+
+## §10 BC 选择重构：几何 z 坐标取代 SDF normal（2026-05-07 七次修订）
+
+### §10.1 问题：mao 等值面碎裂的根因
+
+§9 多 anchor Dirichlet 让 Poisson 在严格容差下收敛，但 mao 模型 iso_045 仍然碎裂成多个不连通片段。`runs/phase3_mao` 体素抽样后发现：BC 选择把**下颌底、鼻底、耳底**等"下向曲面"全部判为底面，phi=0 钉死了多个独立区域 → 多个零势能盆 → 等值面在中层撕裂成碎片。
+
+碎裂根因不是求解器，而是 BC 选择算法。`generateVectorBC` 用 SDF gradient 与 print_direction 点积判断（`bottom_dot_threshold=-0.5`），凡是法向朝下的体素都钉成 phi=0。这对 bunny / armadillo 影响不大（它们底部是单一平面），但对 mao 这种有多个下向曲面的人像几何就崩了。
+
+### §10.2 方案：基于绝对 z 坐标
+
+由用户**预先把模型 z=0 对齐工作平台底面**（这是 KUKA 打印的物理前提，不是 v4 新增约束），然后：
+
+- **底面 BC**: `voxel.z_world ∈ [0, bottom_band_mm]` → phi = 0（Dirichlet）
+- **顶面 BC**: `voxel.z_world ∈ [z_max - top_band_mm, z_max]` → phi = 1（Dirichlet，**取代 §9 顶面 free 方案**，2026-05-10 拍板）
+  - 选 Dirichlet 而不是 Neumann free 的理由：用户目标是"层厚尽可能均匀"。Neumann free 让顶面 phi 自由，φ 场梯度在不同位置不一致 → 等值面物理间距不均；Dirichlet 强制 φ ∈ [0, 1] → 等值面间距更均匀，再配合 `iso_spacing = "uniform"`（按测地距离自适应选 phi 值），层厚误差可压到 ±5%
+- **bottom_band_mm / top_band_mm 自动推算**：`bbox.z * 5%`，clamp 到 `[0.5, 5.0]` mm
+  - 例：mao bbox.z = 70mm → band = 3.5mm
+  - 例：mao_rescaled bbox.z = 49mm → band = 2.45mm
+  - 这避免用户手填一个不合规模的固定值
+
+### §10.3 实现
+
+```cpp
+// src/field/laplacian.cpp generateVectorBC 重写
+// 旧逻辑（删除）：
+// for each voxel: if dot(grad_sdf, print_direction) < bottom_dot_threshold → bottom
+// 新逻辑：
+double band_mm = std::clamp(grid.bbox_size.z() * 0.05, 0.5, 5.0);
+for (auto& voxel : grid.active_voxels) {
+    double z_world = grid.toWorld(voxel.idx).z();
+    if (z_world < band_mm) bc.bottom_indices.push_back(voxel.linear_idx);
+    if (z_world > grid.bbox.zmax - band_mm) bc.top_indices.push_back(voxel.linear_idx);
+}
+```
+
+### §10.4 配置变更（向后兼容）
+
+`config/*.toml` 里 `[field.boundary]` 新增 `strategy` 字段（之前只有隐式行为）：
+
+```toml
+[field.boundary]
+strategy             = "geometric_z"     # 新默认，§10
+# strategy           = "sdf_normal"      # 旧行为，仅向后兼容用
+print_direction      = [0.0, 0.0, 1.0]
+# bottom_band_mm / top_band_mm 留空 → 按 bbox.z * 5% 自动推算
+```
+
+### §10.5 验收
+
+- mao 原版 vector_kuka tolerance=1e-6：iso_045 单一连通片，不再碎裂；per-layer cc=1 且 max-per-layer cc 也 = 1
+- mao_rescaled / armadillo / bunny：与 §9 结果不劣化超 5%（这些模型底部规整，sdf_normal 和 geometric_z 应当给出几乎一样的 BC）
+- visualizations 必须输出（`bottom_band.ply`, `top_band.ply`, `iso_NNN.stl`）并人眼审过 mao 的 iso_005/045/095 三层
+
+### §10.6 工程量
+
+~80 LOC 改动 + 配置项加 1。0.5 天。
+
+---
+
+## §11 笛卡尔位姿构造 + 解析 6 轴 IK 模块（2026-05-07 七次修订）
+
+### §11.1 触发：MATLAB 链路彻底删除
+
+v4 §6 把 IK 委托给 MATLAB 脚本，C++ 只输出笛卡尔位姿。本次修订**彻底取消 MATLAB 依赖**，所有 IK 在 C++ 内闭环。理由：
+1. MATLAB 不在生产部署链路（KUKA 现场没装），原方案是脱离实际的
+2. 跨语言桥接（mat 文件读写）是无谓复杂度
+3. KR4 R600 是球腕，解析 IK 闭式解只需 ~300 LOC，工程上比维护 MATLAB 桥便宜
+
+### §11.2 笛卡尔位姿构造
+
+输入：曲面路径点 `p ∈ R^3` + 路径切线 `t ∈ R^3`（来自 §13 等值线）+ G 场方向 `g ∈ R^3`（来自 §7 平滑后 G 场，每点的工件竖直方向）。
+
+构造工具坐标系（喷头朝向工件、沿路径切线移动）：
+```
+tool_z = -g                                  // 喷头沿 G 反向（指向工件内部）
+tool_x = normalize(t - dot(t, tool_z)*tool_z) // 路径切线投影到 ⊥tool_z 平面
+tool_y = cross(tool_z, tool_x)                // 正交补全
+R_tool = [tool_x | tool_y | tool_z]           // 3x3 旋转矩阵
+(A, B, C) = ZYX_Euler(R_tool)                 // 转 KUKA RPY 欧拉角
+```
+
+输出：`CartPose { X, Y, Z, A, B, C }`（KUKA 约定：X/Y/Z mm, A/B/C deg）。
+
+**路径切线方向约定（2026-05-10 拍板）**：等值线 polyline 的方向（顺/逆时针）由 §13 决定后，§11 检查 `tool_y = tool_z × tool_x` 是否指向工件**外侧**（即 dot(tool_y, outward_normal) > 0）。如果指向内侧，反转切线方向重算。理由：避免喷头侧面碰到已打印部分。
+
+### §11.3 KR4 R600 DH 参数（来自 `mstraj0110.m`）
+
+| 关节 | a (mm) | α (rad) | d (mm) | θ offset | qlim (deg)      | speed (deg/s) |
+|------|--------|---------|--------|----------|-----------------|---------------|
+| L1   | 0      | π/2     | 330    | 0        | [-170, 170]     | 336           |
+| L2   | 290    | π       | 0      | 0        | [-195, 40]      | 336           |
+| L3   | 20     | -π/2    | 0      | 0        | [-115, 150]     | 488           |
+| L4   | 0      | π/2     | 310    | 0        | [-185, 185]     | 600           |
+| L5   | 0      | -π/2    | 0      | 0        | [-120, 120]     | 529           |
+| L6   | 0      | 0       | flange + 12 | 0   | [-350, 350]     | 800           |
+
+法兰 z 偏移 12mm（来自 `mstraj0110.m` 的 `Tz(0.012)`），喷头 TCP 在法兰再加用户标定值（默认 0.28mm，来自 `[kuka.robot] z_offset = 0.28`）。
+
+### §11.4 解析 IK 算法（球腕闭式解）
+
+```
+1. wrist_center = TCP_position - (d6 + tool_offset) * tool_z   // 球腕中心 = TCP 沿 tool_z 反推
+2. A1 = atan2(wc.y, wc.x)                                      // 第一轴解 (主臂态: front/back)
+3. r = sqrt(wc.x² + wc.y²) - a3                                // 平面内径向距离
+4. s = wc.z - d1                                                // 平面内高度
+5. cos(A3) = (r² + s² - a2² - d4²) / (2 * a2 * d4)             // 余弦定理
+   A3 = ±acos(...)                                              // 主臂态: elbow up/down
+6. A2 = atan2(s, r) - atan2(d4*sin(A3), a2 + d4*cos(A3))
+7. R0_3 = forwardKin(A1, A2, A3).rotation                      // 前 3 轴累积旋转
+8. R3_6 = R0_3.transpose() * R_tool                            // 球腕需要的相对旋转
+9. (A4, A5, A6) = ZYZ_Euler(R3_6)                              // 球腕 ZYZ 解（A5 ≥ 0 / A5 ≤ 0 → 腕翻转两解）
+```
+
+**多解处理**：理论上有 2(肩) × 2(肘) × 2(腕) = 8 解。挑选规则：
+- 排除越限（关节超 qlim）
+- 排除奇异邻域（|A5| < 5°）
+- 在剩余解中选**与上一帧关节角加权 L2 距离最小**的（保证轨迹连续）
+- 第一帧用 home 关节角（§15.5）作为参考
+
+### §11.5 接口
+
+```cpp
+// src/kinematics/dh_params.h
+struct KR4DHParams {
+    std::array<double, 6> a    = {0,    290,  20,    0,    0, 0};
+    std::array<double, 6> alpha= {M_PI/2, M_PI, -M_PI/2, M_PI/2, -M_PI/2, 0};
+    std::array<double, 6> d    = {330,  0,    0,    310,  0, 0};
+    double flange_z   = 12.0;
+    double tool_z     = 0.28;
+    std::array<std::array<double, 2>, 6> qlim_deg{{
+        {-170, 170}, {-195, 40}, {-115, 150}, {-185, 185}, {-120, 120}, {-350, 350}}};
+};
+
+// src/kinematics/ik_solver.h
+struct CartPose { double X, Y, Z, A, B, C; };  // KUKA 约定 mm + deg ZYX
+struct JointConfig { std::array<double, 6> q_deg; };
+
+enum class IKStatus { OK, OutOfWorkspace, JointLimit, NearSingularity };
+
+struct IKResult {
+    IKStatus status;
+    JointConfig solution;
+    std::array<JointConfig, 8> all_solutions;  // 调试用
+};
+
+IKResult solveAnalyticalIK(
+    const CartPose& target,
+    const JointConfig& reference,         // 上一帧或 home
+    const KR4DHParams& dh);
+
+CartPose forwardKin(const JointConfig& q, const KR4DHParams& dh);
+```
+
+### §11.6 验收
+
+- 单元测试：`testIKRoundTrip` —— 随机生成 1000 组关节角 → forwardKin → solveAnalyticalIK → 解的关节角差 < 1e-6 deg
+- 与 KUKA 示教器实测：现场任选 5 个示教点位姿，C++ IK 解的关节角与示教器读数差 < 0.05°
+- 与 home 位姿对照：home `(A2, A3, A5) = (9.95, -62.26, -37.69)` 对应 forwardKin 给出的 TCP 位姿，与示教器 RIst 实测差 < 0.5mm + 0.05°
+
+### §11.7 工程量
+
+- DH 参数 + 正向运动学：~80 LOC
+- 解析 IK + 多解选择：~250 LOC
+- 单元测试：~150 LOC
+- **总 ~480 LOC，4 天**
+
+---
+
+## §12 双层可达性 + 奇异性过滤（2026-05-07 七次修订）
+
+### §12.1 双层结构
+
+| 层 | 数据对象 | 时机 | 用途 |
+|----|---------|------|------|
+| Position B | G 场体素（每个体素一个 G 方向）| §11 IK 之前 | 提早剔除"该体素附近无可行姿态"，让 §13 等值线生成跳过 |
+| Position C | 路径采样点（来自 §13 等值线）| §13 之后、§14 平滑之前 | 精确判断每个 TCP 点位是否可达 |
+
+B 层是粗剔除（按体素，~1 个 IK 每体素），C 层是精剔除（按路径点，密度高得多但已被 B 层过滤剩下的部分）。
+
+### §12.2 检查项
+
+每次调用 `checkReachability(pose, reference)`：
+1. **工作空间**：`||TCP|| ∈ [r_min, r_max]`，r_min/r_max 由 KR4 R600 标定（默认 r_min = 100mm, r_max = 600mm）
+2. **关节限位**：`solveAnalyticalIK` 返回的所有解都越限 → 不可达
+3. **奇异性**：
+   - 腕奇异: `|A5| < 5°`
+   - 肩奇异: `|A2 + A3| < 5°` 或 `|A2 + A3 - 180°| < 5°`（手腕直接位于 A1 旋转轴线）
+4. **臂态突变**：与 reference 比较，主臂态（front/back, elbow up/down）发生翻转 → 标记为不连续点
+
+### §12.3 整层放弃阈值
+
+- 单层路径点不可达率 > 30% → 整层标记 SKIPPED，不参与后续 §14
+- 单层路径点不可达率 ∈ [10%, 30%] → 警告，可视化高亮，由用户判定
+- 单层路径点不可达率 < 10% → 局部跳过这些点，断点连续段独立平滑
+
+### §12.4 接口
+
+```cpp
+// src/kinematics/reachability.h
+struct ReachabilityParams {
+    double workspace_r_min_mm = 100.0;
+    double workspace_r_max_mm = 600.0;
+    double singularity_a5_deg = 5.0;
+    double singularity_shoulder_deg = 5.0;
+    double layer_skip_threshold = 0.30;       // 整层放弃阈值
+    double layer_warn_threshold = 0.10;       // 警告阈值
+};
+
+struct ReachabilityResult {
+    IKStatus status;
+    JointConfig solution;        // 仅当 status == OK
+    bool arm_status_flip;        // 臂态翻转标记
+};
+
+ReachabilityResult checkReachability(
+    const CartPose& pose,
+    const JointConfig& reference,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params);
+
+// Position B 层入口（体素级）
+std::vector<bool> filterReachableVoxels(
+    const VoxelGrid& grid,
+    const VectorField& G,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params);
+
+// Position C 层入口（路径点级）
+struct PathReachabilityResult {
+    std::vector<JointConfig> joint_solutions;  // size = path.size, 不可达点为 nullopt
+    std::vector<int> unreachable_indices;
+    bool layer_skipped;
+};
+PathReachabilityResult filterReachablePathPoints(
+    const PathPolyline& path,
+    const std::vector<CartPose>& poses,
+    const JointConfig& reference,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params);
+```
+
+### §12.5 验收
+
+- mao 模型：可达体素 ≥ 80%（B 层），可达路径点 ≥ 90%（C 层）
+- armadillo / bunny：≥ 95%（B + C 层）
+- 没有任何一层被整层放弃
+- 臂态翻转点数 < 10% 路径总点数
+
+### §12.6 工程量
+
+- B 层（体素级）：~120 LOC
+- C 层（路径点级）：~150 LOC
+- 单元测试：~80 LOC
+- **总 ~350 LOC，3 天**
+
+---
+
+## §13 几何距离等值线路径生成（libigl，2026-05-07 七次修订）
+
+### §13.1 取代 XY scanline 投影
+
+之前 §6 路径策略用 XY 投影 + scanline，这在 overhang 区域（曲面切线接近水平）会丢点或扭曲间距。改用**曲面测地距离 + 等值线提取**：
+
+- 在每层 iso-surface mesh 上选种子点 → 计算每顶点到种子的测地距离 d(v)
+- 提取 isoline at d = k * line_spacing_mm 得到一组闭合等值线
+- 等值线本身**就是路径**，间距均匀（曲面测地意义下），自然处理 overhang
+
+### §13.2 算法
+
+```
+输入: 单层 iso-surface (V ∈ R^Nx3, F ∈ Z^Mx3)
+1. 选种子点：bbox 中心投影到最近顶点
+2. d = igl::exact_geodesic(V, F, seeds={selected})         // O(N log N) Dijkstra-like
+3. for k = 1, 2, ..., until d_max:
+     iso_d = k * line_spacing_mm
+     polylines_k = igl::isolines(V, F, d, iso_d)            // 提取等值线
+4. 每条 polyline 做起点选择 + 方向规范化（见下方 §13.2.1）
+5. 每条 polyline 做 Frenet 切线计算（前向差分）
+6. 输出 PathPolyline { points, tangents, is_closed }
+```
+
+#### §13.2.1 闭合等值线起点 + 方向约定（2026-05-10 拍板）
+
+`igl::isolines` 输出的闭合环没有"起点"且方向任意。规范化规则：
+- **起点**：环上 z 坐标最小的顶点（最靠近工作平台底）。若多个顶点 z 相同（环水平），取 x 最小的。理由：起点选最低点让喷头从"贴近平台"开始打，初始落点更稳定。
+- **方向**：先任取一个方向算切线 → 调用 §11.2 构造工具坐标系 → 检查 `tool_y` 是否指向工件外侧。若指向内侧 → 反转 polyline 方向重算。这样保证 §11 不会"喷头侧面朝向已打印部分"。
+
+### §13.3 老项目代码评估结论
+
+| 老项目文件 | LOC | 决策 |
+|-----------|-----|------|
+| `exact_geodesic.cpp/h` | 1607+191 | **不直接迁移**。功能用 `igl::exact_geodesic` 替代（libigl header-only，~30 行调用代码）。老代码包含 Kimmel-Sethian 自实现 + 大量调试 logging，与 libigl 重复。 |
+| `MarchingTriangles.cpp/h` | 1927+210 | **不迁移**。包含 `gmpxx.h`（GMP 精确算术依赖）。等值线提取用 `igl::isolines`（基于 Shewchuk robust predicates，已足够鲁棒）。 |
+| `pathPostprocessing.cpp/h` | 335+41 | **简化迁移 ~250 LOC**。保留 `wlsFilter1d` + `LinearSmooth31/51/52`，删除冗余调试代码。 |
+
+GMP 不引入：libigl 用 Shewchuk robust predicates 处理几何谓词的退化情况，不需要任意精度算术。GMP 是 binary 库，Windows 上集成复杂；libigl 是 header-only，与 Eigen 无缝集成。
+
+### §13.4 接口
+
+```cpp
+// src/path/geodesic_paths.h
+struct GeodesicPathParams {
+    double line_spacing_mm = 0.4;          // 等值线间距 = 路径间距
+    double resample_step_mm = 0.2;         // 沿等值线重采样步长
+    int    seed_strategy = 0;              // 0=bbox center, 1=user-specified
+    Eigen::Vector3d user_seed_point;       // 仅当 seed_strategy=1
+    int    smooth_window = 5;              // 平滑窗口
+};
+
+struct PathPolyline {
+    std::vector<Eigen::Vector3d> points;
+    std::vector<Eigen::Vector3d> tangents;
+    bool   is_closed;
+    double total_length_mm;
+};
+
+std::vector<PathPolyline> generateGeodesicPaths(
+    const Eigen::MatrixXd& V,            // iso-surface 顶点
+    const Eigen::MatrixXi& F,            // iso-surface 三角面
+    const GeodesicPathParams& params);
+```
+
+### §13.5 验收
+
+- 路径间距均匀性：测量相邻路径的最近邻距离，均值 ± 5% 范围内
+- 路径连续性：单条 polyline 内相邻点间距方差 < 0.05 * resample_step_mm
+- overhang 测试：用 armadillo 后腿（典型 overhang）验证不丢点
+- 与 XY scanline 对比：在 mao 头顶（接近水平）路径数量与曲面面积比一致
+
+### §13.6 工程量
+
+- libigl 集成 + 等值线提取：~150 LOC
+- 路径切线计算 + 重采样：~100 LOC
+- 路径后处理（迁移自 pathPostprocessing 简化版）：~250 LOC
+- 单元测试：~80 LOC
+- **总 ~580 LOC，5 天**
+
+---
+
+## §14 5 次多项式关节角轨迹平滑（2026-05-07 七次修订）
+
+### §14.1 目标
+
+`§12 输出 vector<JointConfig>`（离散关节角序列，间距由 §13 路径采样决定）→ `§14 输出 vector<TrajectoryPoint>`（密采样、时间戳对齐 RSI 4ms 周期、位置/速度/加速度连续）。
+
+### §14.2 算法：分段 5 次多项式
+
+每两个相邻关节角点之间，对每个关节独立做 5 次多项式插值：
+```
+q(t) = c0 + c1*t + c2*t² + c3*t³ + c4*t⁴ + c5*t⁵
+```
+
+边界条件（端点零速度版，`zero_endpoint_velocity = true`）：
+- `q(0) = q_start`, `q(T) = q_end`
+- `q'(0) = 0`, `q'(T) = 0`
+- `q''(0) = 0`, `q''(T) = 0`
+
+→ 6 个未知数 6 个方程，闭式解。位置 + 速度 + 加速度连续，jerk 在段交界处可能间断（可接受）。
+
+### §14.3 双时间约束
+
+每段段长 T 由两个约束的 max 决定：
+
+```
+Δt_cartesian = d_cartesian / target_line_speed_mm_per_s     // TCP 直线距离 / 期望线速度
+Δt_joint     = max_i(|Δθ_i|) / max_joint_velocity_deg_per_s  // 最大关节转角 / 关节速度限
+T = max(Δt_cartesian, Δt_joint)
+```
+
+举例（target_line_speed = 5mm/s, max_joint_velocity = 200°/s）：
+- 段 A：TCP 移 2mm，最大关节转 1° → Δt_cart = 0.4s, Δt_joint = 0.005s → T = 0.4s（线速度主导）
+- 段 B：TCP 几乎不动（0.01mm），但 A1 翻转 30°（接近奇异） → Δt_cart = 0.002s, Δt_joint = 0.15s → T = 0.15s（关节速度主导）
+
+### §14.4 周期对齐 RSI 4ms
+
+`sample_period_ms = 4`，与 RSI IPO_FAST 严格对齐。每段 T 内插值出 `ceil(T / 4ms)` 个采样点，第 i 个点：
+```
+t_i = i * 4ms
+q_i = polynomial(t_i)
+```
+
+最后一个点的 t 可能 ≠ T（被向上取整），用线性插值修正。
+
+### §14.5 关键参数（保守初值）
+
+| 参数 | 默认值 | 上限 | 说明 |
+|------|--------|------|------|
+| target_line_speed_mm_per_s | 5.0 | 100 | 喷头打印线速度 |
+| sample_period_ms | 4.0 | 12 | 必须匹配 RSI 周期 |
+| max_joint_velocity_deg_per_s | 200 | 800（A6 物理上限）| 保守，远低于 KR4 R600 实际 336/336/488/600/529/800 |
+| max_joint_accel_deg_per_s2 | 500 | 2000 | 保守 |
+| max_joint_delta_per_cycle_deg | 3.0 | 5.0（RSI AXISCORR 默认安全限）| 每 4ms 单关节最大增量 |
+| zero_endpoint_velocity | true | — | 段端点零速度（简单但有短暂停顿）|
+
+### §14.6 接口
+
+```cpp
+// src/trajectory/poly5_smoother.h
+struct TrajectoryParams {
+    double target_line_speed_mm_per_s    = 5.0;
+    double sample_period_ms              = 4.0;
+    double max_joint_velocity_deg_per_s  = 200.0;
+    double max_joint_accel_deg_per_s2    = 500.0;
+    double max_joint_delta_per_cycle_deg = 3.0;
+    bool   zero_endpoint_velocity        = true;
+};
+
+struct TrajectoryPoint {
+    double timestamp_ms;
+    std::array<double, 6> joint_deg;
+    std::array<double, 6> joint_velocity_deg_per_s;
+    std::array<double, 6> joint_accel_deg_per_s2;
+    bool   wire_on;
+    double plc_mode  = 1.0;       // 0=stop, 1=fwd, 2=rev
+    double plc_speed = 5.0;
+    double plc_ratio = 1000.0;
+};
+
+struct PathPointWithJoints {
+    Eigen::Vector3d cart_pos;
+    JointConfig     joint;
+    bool            wire_on;
+};
+
+std::vector<TrajectoryPoint> smoothTrajectoryPoly5(
+    const std::vector<PathPointWithJoints>& path,
+    const TrajectoryParams& params);
+```
+
+### §14.7 验收
+
+- 速度上限：`max_i max_t |joint_velocity[i](t)| ≤ max_joint_velocity` 严格成立
+- 加速度上限：同上
+- 单步增量：相邻两个 TrajectoryPoint 的关节角差 < `max_joint_delta_per_cycle_deg`
+- 段间连续：位置连续到 1e-9，速度连续到 1e-6
+- 时间戳：`timestamp_ms[i+1] - timestamp_ms[i] == sample_period_ms` 严格成立
+
+### §14.8 工程量
+
+- 5 次多项式系数闭式解：~80 LOC
+- 双时间约束 + 段长决定：~60 LOC
+- 周期重采样：~50 LOC
+- 上限校验 + 错误处理：~60 LOC
+- 单元测试：~150 LOC
+- **总 ~400 LOC，3 天**
+
+---
+
+## §15 双格式输出：KRL 离线 + RSI 在线（2026-05-07 七次修订）
+
+### §15.1 共享数据源
+
+`§14 输出的 vector<TrajectoryPoint>` 是 §15a / §15b 的共同起点，两条下游分支独立：
+
+```
+vector<TrajectoryPoint>
+       │
+       ├──→ §15a writeKRL()           → job.src + job.dat 写盘（离线）
+       │
+       └──→ §15b RSISender::stream()  → 4ms UDP XML 双向通信（在线）
+```
+
+### §15.2 §15a 离线 KRL 输出
+
+#### §15.2.1 文件对：`.src` 程序文件 + `.dat` 数据文件
+
+**`.dat`（数据文件）**：每个轨迹点一条 `DECL E6AXIS XPi` 记录。
+```
+&ACCESS RVO
+&REL 1
+DEFDAT  curved_print
+DECL E6AXIS XHOME = {A1 0.0,A2 9.95,A3 -62.26,A4 0.0,A5 -37.69,A6 0.0,
+                     E1 0.0,E2 0.0,E3 0.0,E4 0.0,E5 0.0,E6 0.0}
+DECL E6AXIS XP1 = {A1 0.123, A2 9.876, ..., A6 0.0}
+DECL E6AXIS XP2 = ...
+...
+ENDDAT
+```
+
+**`.src`（程序文件）**：主流程。
+```
+&ACCESS RVO
+&REL 1
+DEF curved_print()
+  INI
+  $TOOL = TOOL_DATA[8]
+  $BASE = BASE_DATA[6]
+  $VEL_AXIS[1] = 80
+  $APO.CPTP = 0                          ; 禁用 PTP blending（见 §15.2.2）
+  ...
+  EXTRUDER_OFFLINE_ENABLE = TRUE
+  PTP XHOME                              ; 起点
+  EXTRUDER_OFFLINE_MODE  = 1.0           ; 1=正转送丝（整层启动）
+  EXTRUDER_OFFLINE_SPEED = 5.0
+  EXTRUDER_OFFLINE_RATIO = 1000.0
+  PTP XP1
+  PTP XP2
+  PTP XP3
+  ...
+  EXTRUDER_OFFLINE_MODE  = 0.0           ; 整层结束停止
+  PTP XHOME
+  EXTRUDER_OFFLINE_ENABLE = FALSE
+END
+```
+
+**运动指令选择（2026-05-10 拍板）**：全程用 **PTP** 不用 LIN。理由：
+1. §14 已经做了 4ms 密采样，相邻两点间距极小（线速度 5mm/s × 4ms = 0.02mm），PTP 走出来的 TCP 轨迹与 LIN 直线差异可忽略
+2. PTP 指定关节角，KUKA 不会内部重做 IK，避免**臂态跳变**风险
+3. LIN 在曲面打印的某些段（接近奇异）会被 KUKA 自动降速，反而不如 PTP 稳定
+
+**送丝触发时机（2026-05-10 拍板，方案 X）**：每层开头 `EXTRUDER_OFFLINE_MODE = 1.0`，层尾 `= 0.0`。层内不切换。简单可用即可，预启动/延迟关停等精细策略推迟到 §16 或 §17 brainstorm。
+
+#### §15.2.2 关键参数（与现役 KUKA 配置对齐）
+
+| 字段 | 值 | 来源 |
+|------|----|------|
+| `$TOOL` | `TOOL_DATA[8]` | `[kuka.robot] tool_no = 8`（来自老 Offline.cpp） |
+| `$BASE` | `BASE_DATA[6]` | 同上 base_no |
+| Status (E6POS 用，本设计用 E6AXIS 不用) | 4 | 老 Offline.cpp |
+| Turn (同上) | 28 | 同上 |
+| 平台 z_offset | 0.28 mm | 同上 |
+| `$VEL_AXIS[*]` | 80（保守） | 联调期可调 |
+| `$APO.CPTP` | 0（禁用 PTP blending） | §14 已平滑，不希望 KUKA 再插入近似过渡改变轨迹 |
+| `EXTRUDER_OFFLINE_ENABLE/MODE/SPEED/RATIO` | 见 sps.sub | 离线模式 PLC 信号 |
+
+#### §15.2.3 接口
+
+```cpp
+// src/io/krl_writer.h
+struct KRLOutputParams {
+    int tool_no       = 8;
+    int base_no       = 6;
+    double vel_axis_pct = 80.0;
+    JointConfig home_pose;     // 见 §15.5
+    std::string job_name = "curved_print";
+};
+
+void writeKRL(
+    const std::vector<TrajectoryPoint>& trajectory,
+    const KRLOutputParams& params,
+    const std::filesystem::path& output_dir);
+// 输出: output_dir/<job_name>.src + output_dir/<job_name>.dat
+```
+
+#### §15.2.4 工程量
+
+- `.dat` writer: ~80 LOC
+- `.src` writer (含 PLC 信号 + WAIT 处理): ~150 LOC
+- KRL 模板比对老 Offline.cpp 校验: ~50 LOC
+- 单元测试 (输出文本对比 fixture): ~100 LOC
+- **总 ~380 LOC，3 天**
+
+### §15.3 §15b 在线 RSI 输出
+
+#### §15.3.1 协议确认（来自 KUKA Ethernet RSI XML 1.1 官方文档）
+
+| RSI XML 标签 | 含义 | 单位 |
+|-------------|------|------|
+| `<RKorr X Y Z A B C>` | 笛卡尔位姿增量（X/Y/Z 平移 + A/B/C 转角） | X/Y/Z=米, A/B/C=度 |
+| `<AKorr A1..A6>` 或 `<AK A1..A6>` | 6 关节角增量 | 度 |
+| `<EKorr E1..E6>` 或 `<EK E1..E6>` | 6 外部轴角增量（不用） | 度 |
+| `<DiO>` | 数字输出（位掩码） | LONG |
+| `<ZENG_OUT1/2/3>` | 用户自定义字段（PLC 信号） | DOUBLE |
+| `<IPOC>` | 周期序号（必须原样回） | LONG |
+
+**两组校正字段独立**，不可混用。本设计用 `<AK A1..A6>`（关节角路径）。
+
+#### §15.3.2 必须的 RSI 配置改造（OPEN-1 解决方案）
+
+现役 `RSI_Ethernet.rsi.xml` 是 POSCORR 配置（`RKorr.X/Y/Z/A/B/C`），无法直接发关节角。改造步骤：
+
+1. **改 `RSI_Ethernet.rsi.xml`**：把 `POSCORR1` 块替换为 `AXISCORR1`（KUKA RSI 标准对象）
+2. **改 `RSI_EthernetConfig.xml` `<RECEIVE>` 段**：
+   ```xml
+   <!-- 删除 -->
+   <ELEMENT TAG="RKorr.X" TYPE="DOUBLE" INDX="1" UNIT="1" HOLDON="1" />
+   ... RKorr.Y/Z/A/B/C ...
+   <!-- 新增 -->
+   <ELEMENT TAG="AK.A1" TYPE="DOUBLE" INDX="1" UNIT="0" HOLDON="1" />
+   <ELEMENT TAG="AK.A2" TYPE="DOUBLE" INDX="2" UNIT="0" HOLDON="1" />
+   <ELEMENT TAG="AK.A3" TYPE="DOUBLE" INDX="3" UNIT="0" HOLDON="1" />
+   <ELEMENT TAG="AK.A4" TYPE="DOUBLE" INDX="4" UNIT="0" HOLDON="1" />
+   <ELEMENT TAG="AK.A5" TYPE="DOUBLE" INDX="5" UNIT="0" HOLDON="1" />
+   <ELEMENT TAG="AK.A6" TYPE="DOUBLE" INDX="6" UNIT="0" HOLDON="1" />
+   <!-- 保留 -->
+   <ELEMENT TAG="ZENG_OUT1" TYPE="DOUBLE" INDX="9" HOLDON="1" />
+   <ELEMENT TAG="ZENG_OUT2" TYPE="DOUBLE" INDX="10" HOLDON="1" />
+   <ELEMENT TAG="ZENG_OUT3" TYPE="DOUBLE" INDX="11" HOLDON="1" />
+   ```
+3. **用 RSIVisual 重编译** `.rsi.xml` → `.rsi` 二进制（覆盖 `RSI_Ethernet.dat`）
+4. **部署到 KUKA** `KRC:\R1\Program\`：`RSI_Ethernet.dat` + `RSI_EthernetConfig.xml`
+5. `RSI_Ethernet.src` **不需要改**（`RSI_CREATE / RSI_ON(#RELATIVE) / RSI_MOVECORR` 不依赖 POSCORR vs AXISCORR）
+
+新配置文件以文本形式纳入仓库：`docs/kuka/rsi_axiscorr/RSI_Ethernet.rsi.xml` + `RSI_EthernetConfig.xml`，由 CLI #2 在 §15b 实现时生成。
+
+#### §15.3.3 周期 = 4ms（IPO_FAST 默认）
+
+来源：`RSI.src` 第 168-170 行 + `RSI_Ethernet.src` 第 50 行 `RSI_ON(#RELATIVE)` 不传 sensorMode → 默认 `#IPO_FAST`。
+
+**OPEN-3 待 PDF 终验**：用户从 `KST_RSI_50_en.pdf` 确认即可。
+
+#### §15.3.4 PLC 信号映射（来自 sps.sub）
+
+| 上层语义 | RSI XML 字段 | KUKA 内部 | 物理输出 |
+|---------|-------------|----------|---------|
+| 模式 (0=停, 1=正转, 2=反转) | `<ZENG_OUT1>` | `ZENG_OUT1` 直接赋值 | `$OUT[1/2/3]` 三选一 |
+| 送丝速度 | `<ZENG_OUT2>` | `ZENG_OUT2` → 内部 `Speed` | analog out |
+| 流量倍率 | `<ZENG_OUT3>` | `ZENG_OUT3` → 内部 `Ratio` | analog out |
+
+> 注：旧版 sps.sub 第 63-65 行原本通过 `$SEN_PREA[6/7/8]` 间接路由，新版 RSI 配置直接用 `<ZENG_OUT1/2/3>`，不再需要 SEN_PREA。
+
+#### §15.3.5 收发包格式
+
+KUKA → PC（每 4ms 一包）：
+```xml
+<Sen Type="ImFree">
+  <RIst X="461.89" Y="5.64" Z="706.63" A="0" B="0" C="-90"/>
+  <RSol X="461.89" Y="5.64" Z="706.63" A="0" B="0" C="-90"/>
+  <Delay D="0"/>
+  <Tech.C1 .../>
+  <DiL>0</DiL>
+  <Digout o1="0" o2="1" o3="0"/>
+  <Source1>...</Source1>
+  <IPOC>1234567890</IPOC>
+</Sen>
+```
+
+PC → KUKA（必须 < 4ms 内回，否则 RSI 超时停机）：
+```xml
+<Sen Type="ImFree">
+  <EStr></EStr>
+  <Tech.T2 .../>
+  <AK A1="0.10" A2="-0.05" A3="0.08" A4="0.0" A5="-0.02" A6="0.0"/>
+  <FREE>0</FREE>
+  <DiO>0</DiO>
+  <ZENG_OUT1>1.0</ZENG_OUT1>
+  <ZENG_OUT2>5.0</ZENG_OUT2>
+  <ZENG_OUT3>1000.0</ZENG_OUT3>
+  <IPOC>1234567890</IPOC>
+</Sen>
+```
+
+#### §15.3.6 实时性约束
+
+Windows 非 RT OS，4ms 硬实时回包要求：
+- 主回包线程优先级：`SetThreadPriority(THREAD_PRIORITY_TIME_CRITICAL)`
+- 关键路径**禁止**：堆分配、互斥锁、文件 IO、日志格式化
+- 预分配所有缓冲区（XML 解析 / 序列化用 fixed-size buffer）
+- XML 解析：用 `pugixml` header-only 库，禁用 DOM tree 持久化（每包 parse 后立即丢弃）
+- IPOC 同步：第一帧等 KUKA 包到达，记下起始 IPOC；之后每包原样回 IPOC
+
+#### §15.3.7 接口
+
+```cpp
+// src/io/rsi_sender.h
+struct RSISenderParams {
+    std::string kuka_host  = "192.168.2.128";    // 来自 RSI_EthernetConfig.xml
+    int         port       = 59152;              // 同上
+    int         cycle_ms   = 4;                  // IPO_FAST
+    int         max_late_packets = 100;          // 与 KUKA 端 Timeout=100 对齐
+    std::string sentype    = "ImFree";
+};
+
+class RSISender {
+public:
+    explicit RSISender(const RSISenderParams& params);
+    ~RSISender();
+
+    // 阻塞执行整段轨迹：每 4ms recv KUKA 包 → 取下一帧 delta → format → send
+    // 返回值: 完成的轨迹点数 (期望 == trajectory.size())
+    size_t streamTrajectory(const std::vector<TrajectoryPoint>& trajectory);
+
+    void disconnect();
+
+private:
+    RSISenderParams params_;
+    boost::asio::io_context io_ctx_;
+    std::unique_ptr<boost::asio::ip::udp::socket> socket_;
+    int64_t initial_ipoc_ = -1;
+};
+```
+
+#### §15.3.8 工程量
+
+- UDP socket + boost::asio 集成：~100 LOC
+- pugixml 解析 + 序列化：~200 LOC
+- 实时线程 + 优先级控制：~80 LOC
+- IPOC 同步 + 增量差分（从绝对关节角差分到 delta）：~80 LOC
+- 错误处理（包丢失、超时、KUKA 端 EStr）：~80 LOC
+- 单元测试（loopback UDP，模拟 KUKA 端）：~150 LOC
+- **总 ~700 LOC，6 天**
+
+### §15.4 HOME 关节角（现场实测，2026-05-07）
+
+```
+A1 = 0.00°
+A2 = +9.95°
+A3 = -62.26°
+A4 = 0.00°
+A5 = -37.69°
+A6 = 0.00°
+```
+
+A2+A3+A5 ≈ -90° → 工具姿态相对 base 翻 90°，喷头水平指向工件（与现场布局一致）。
+
+配置写入：
+```toml
+[kuka.home]
+joint_deg = [0.0, 9.95, -62.26, 0.0, -37.69, 0.0]
+```
+
+KRL 端使用：`§15a` 写 `DECL E6AXIS XHOME = {A1 0.0, A2 9.95, ...}` + `.src` 起始/结束 `PTP XHOME`。RSI 端 `RSI_Ethernet.src` 已有 `SPTP Xhome`，§15b 不需要发 home 指令但首帧前会校验当前位姿与 home 一致（差 > 1° 报警）。
+
+### §15.5 验收
+
+- §15a：KUKA 示教器导入 `.src + .dat` 无语法错误，离线模拟运行（无机器人）走完整段路径无 fault
+- §15b loopback：本机模拟 KUKA 端 4ms 周期回包，1 万包丢包率 < 0.1%
+- §15b 现场：与真机连接 3 分钟，丢包率 < 1%，机器人无超时停机
+- HOME 校验：§15b 启动时若示教器实际位姿与 home_pose 差 > 1° → 报警拒绝启动
+
+---
+
+## §16 层间衔接：⊓ 形 PTP 转移（2026-05-10 八次修订）
+
+### §16.1 背景
+
+§14 输出的 `vector<TrajectoryPoint>` 是**单层内**的连续轨迹。实际打印是多层叠加，相邻两层之间需要**过渡路径**：从层 N 末点抬升、水平移动到层 N+1 入口上方、下降到层 N+1 起点。此过程不打印，需保证：
+- 不撞已打印部分（§17 校验）
+- 速度可比打印段快（节省时间）
+- 送丝信号正确切换（开→关→开）
+
+### §16.2 路径形状：⊓ 形 4 keypoint（Q1 选 B2）
+
+每层间转移产生 4 个关键点，依次连接成 ⊓ 形（KRL 用 PTP 串接，§14 5 次多项式平滑）：
+
+| 编号 | 点名 | 坐标 |
+|------|------|------|
+| 1 | `last_pt_N` | 本层 §13 路径最后一个点 `(xy_N_end, z_N_end)` |
+| 2 | `lift_corner_1` | `(xy_N_end, lift_z)` — xy 不变，z 抬到 lift_z |
+| 3 | `lift_corner_2` | `(xy_N+1_start, lift_z)` — z 不变，xy 移到下层入口 |
+| 4 | `first_pt_N+1` | 下一层 §13 路径第一个点 `(xy_N+1_start, z_N+1_start)` |
+
+工具姿态 (A/B/C) 的处理：
+- 点 1 / 点 4：用 §11 算出的姿态（来自各自所属的打印路径段）
+- 点 2 / 点 3：用与点 1 相同的姿态（lift + 水平段不旋转工具，避免姿态抖动）
+- 点 3 → 点 4 之间：§14 5 次多项式自然把姿态从点 1 的姿态平滑插值到点 4 的姿态（在 4ms/帧的密采样里逐步旋转）
+
+### §16.3 抬升高度（Q2 选 B）
+
+```
+lift_z = max(layer_N_max_z, layer_N+1_max_z) + safety_margin_mm
+safety_margin_mm = 5.0 (默认)
+```
+
+理由：考虑下一层 z 可能比当前层高，水平段必须高于两层最高点。
+
+### §16.4 转移速度（Q3：用户指定 25 mm/s）
+
+```
+transition_speed_mm_per_s = 25.0  (默认，比打印段快 5×)
+target_line_speed_mm_per_s = 5.0  (打印段，§14)
+```
+
+§14 trajectory smoothing 在 transition 段（点 1→2→3→4）用 `transition_speed_mm_per_s` 替代 `target_line_speed_mm_per_s`。两段交界（last_pt → lift_corner_1）瞬时切速度 → §14 `zero_endpoint_velocity = true` 自然处理（每段端点零速度，从打印段的 5mm/s 减到 0，再加速到 transition 的 25mm/s）。
+
+### §16.5 送丝时机（方案 X，§15.2.1 已定）
+
+```krl
+PTP last_pt_N
+EXTRUDER_OFFLINE_MODE = 0.0      ; 整层结束，关送丝
+PTP lift_corner_1                ; 抬升 (transition speed)
+PTP lift_corner_2                ; 水平
+PTP first_pt_N+1                 ; 下降
+EXTRUDER_OFFLINE_MODE = 1.0      ; 下层开始，开送丝
+```
+
+### §16.6 接口
+
+注意：§16 在 pipeline 里**早于 §14**（见 §17.5 数据流），所以接口用 §14 的输入类型 `PathPointWithJoints`（不是 §14 输出的 `TrajectoryPoint`）。`transition_speed` 作为 hint 传给 §14，让它在该段用 transition speed 替代 print speed。
+
+```cpp
+// src/trajectory/layer_transition.h
+struct LayerTransitionParams {
+    double safety_margin_mm           = 5.0;
+    double transition_speed_mm_per_s  = 25.0;
+};
+
+struct LayerTransitionKeypoints {
+    std::array<PathPointWithJoints, 4> keypoints;   // 1-4 同上表
+    double lift_z;
+    double segment_speed_mm_per_s;                   // = transition_speed_mm_per_s, §14 用
+    bool   collision_safe;                           // §17 校验结果
+};
+
+LayerTransitionKeypoints buildLayerTransition(
+    const PathPointWithJoints& last_pt_N,
+    const PathPointWithJoints& first_pt_Np1,
+    double layer_N_max_z,
+    double layer_Np1_max_z,
+    const LayerTransitionParams& params,
+    const SDFGrid& sdf_full,                         // §17 用
+    const NozzleCylinderParams& nozzle);             // §17 用
+```
+
+§14 的 `smoothTrajectoryPoly5` 接口需要扩展：接收一个 `vector<SegmentSpeedHint>` 让每个 segment 可以独立设速度（打印段用 5mm/s，transition 段用 25mm/s）。这是 §14 的小改动，约 +20 LOC。
+
+### §16.7 失败处理
+
+如果 §17 校验某层间 transition 的 4 个 keypoint 中任一撞墙：
+- 标记该层间过渡失败
+- abort 后续层（不再继续打印）
+- 上报 `failure_layer_index` + 撞点详细信息让用户决策
+
+不做 fallback（如尝试更高 `lift_z`）：违反 "simplest"，且如果 `max(N, N+1) + 5mm` 都撞，说明已打印几何已经异常，不应继续。
+
+### §16.8 验收
+
+- mao / armadillo / bunny 三模型每层间 transition 都生成成功
+- transition keypoints 经 §17 校验通过率 100%
+- KRL 模拟器（KUKA OfficeLite）走完 5 层路径，每层间过渡无 fault
+
+### §16.9 工程量
+
+- 4 keypoint 构造：~80 LOC
+- 与 §14 集成（变速度处理）：~50 LOC
+- 失败处理 + 报告：~50 LOC
+- 单元测试：~80 LOC
+- **总 ~260 LOC，2 天**
+
+---
+
+## §17 喷头圆柱体碰撞检查（2026-05-10 八次修订）
+
+### §17.1 圆柱体模型
+
+把喷头近似为**直立圆柱**（沿 -tool_z 方向，从 TCP 向"工件外"延伸，即喷头本体 + 加热块部分，不含喷嘴尖端）：
+
+```
+        ┌──┐  ← 圆柱顶 (TCP - h * tool_z)
+        │  │
+        │  │ h
+        │  │
+        │  │
+        ●  ← 圆柱底 (TCP)
+        ↓ tool_z (指向工件)
+       工件
+```
+
+参数：
+- `r`: 圆柱半径 (mm) — 喷头本体最粗处的半径
+- `h`: 圆柱高度 (mm) — 从 TCP 到喷头本体顶部的距离
+
+**OPEN-10**: r 和 h 用户尚未实测。临时默认 `r = 10mm`, `h = 30mm`（典型 FDM 喷头 + 加热块尺寸），待用户测量后改 toml。
+
+### §17.2 SDF 源：动态裁剪（Q4 选 C）
+
+不维护增量 SDF。直接用原始输入 STL 的 SDF（§2 voxelize 阶段已生成），但检查时**只考虑当前打印层 z 以下的部分**：
+
+```cpp
+double maskedSDF(const Eigen::Vector3d& p,
+                 double current_layer_max_z,
+                 const SDFGrid& sdf_full) {
+    if (p.z() > current_layer_max_z) {
+        return std::numeric_limits<double>::infinity();   // 上方未打印，视为无穷远
+    }
+    return sdf_full.query(p);
+}
+```
+
+注：`current_layer_max_z` 在每层检查时变化，是当前打印层的最高 z 值。SDF 内部 (sdf < 0) 才算撞。
+
+### §17.3 检查算法
+
+对每个待检查的 `(TCP_pose, R_tool)` 点：
+1. 从 R_tool 提取 tool_x, tool_y, tool_z 方向
+2. 沿圆柱轴线 (-tool_z) 等间距采样 K 个点（默认 K=10）：
+   ```
+   sample_i = TCP - (i / K) * h * tool_z    for i = 1..K
+   ```
+3. 对每个采样点 sample_i，圆柱"截面"是半径 r 的圆。在 ⊥tool_z 平面内绕 sample_i 取 M 个圆周点（默认 M=8）：
+   ```
+   circle_pt_j = sample_i + r * (cos(θ_j) * tool_x + sin(θ_j) * tool_y)
+                 for θ_j = j * 2π / M, j = 0..M-1
+   ```
+4. 对每个圆周点 circle_pt，查 `maskedSDF(circle_pt) < 0` → 撞
+5. 任意一点撞 → 整个 pose 标记 `COLLISION`
+
+总采样点数：`K × M = 80` 个/pose。SDF 查询 O(1)（grid lookup）。每 pose 检查开销 ~80 SDF queries。
+
+### §17.4 碰撞响应（Q5 选 B 两级，与 §12 一致）
+
+| 单层碰撞率 | 处理 |
+|-----------|------|
+| 0% | 通过 |
+| 0% < 率 ≤ 30% | 单点跳过（§14 平滑时跳过这些点的 segment）|
+| > 30% | 整层 SKIPPED，不参与 §14 + §15a/b |
+
+阈值参数：`collision_layer_skip_threshold = 0.30`（与 §12 `layer_skip_threshold` 同值，但语义独立）。
+
+### §17.5 检查时机（Q6 选 A 预平滑）
+
+更新 §15.1 的 pipeline 数据流：
+
+```
+§13 geodesic isolines
+       │
+       ▼
+§11 IK (per-path-point)
+       │
+       ▼
+§12 reachability filter (per-layer 30% threshold)
+       │
+       ▼
+§17 collision check (path-level, per-layer 30% threshold)  ← 新增
+       │
+       ▼
+§16 insert layer transitions (4 keypoints / 转移)
+       │
+       ▼
+§17 collision check (transition keypoints only)            ← 新增
+       │
+       ▼
+§14 5-poly smooth
+       │
+       ▼
+§15a writeKRL  /  §15b RSI sender
+```
+
+§14 平滑后**不再 §17 二查**（理由：5 次多项式不会大幅偏移 XY，多检几乎冗余）。
+
+### §17.6 接口
+
+```cpp
+// src/safety/nozzle_collision.h
+struct NozzleCylinderParams {
+    double radius_mm                        = 10.0;     // OPEN-10
+    double height_mm                        = 30.0;     // OPEN-10
+    int    axial_samples                    = 10;       // K
+    int    circumferential_samples          = 8;        // M
+    double collision_layer_skip_threshold   = 0.30;
+};
+
+enum class CollisionStatus { OK, COLLISION };
+
+struct CollisionResult {
+    CollisionStatus status;
+    int             colliding_sample_idx;    // 第几个采样点撞 (调试用)
+    double          min_distance_mm;         // 最近距离 (调试用，所有 80 点中最小)
+};
+
+// 单点检查
+CollisionResult checkNozzleCollision(
+    const CartPose& pose,
+    const Eigen::Matrix3d& R_tool,           // tool_x, tool_y, tool_z 由列提取
+    const SDFGrid& sdf_full,
+    double current_layer_max_z,
+    const NozzleCylinderParams& params);
+
+// 整层检查 + 两级阈值
+struct LayerCollisionReport {
+    int    total_points;
+    int    colliding_points;
+    double collision_rate;
+    bool   layer_skipped;
+    std::vector<int> skipped_indices;        // 单点跳过的 idx 列表
+};
+
+LayerCollisionReport checkLayerCollision(
+    const std::vector<CartPose>& layer_poses,
+    const std::vector<Eigen::Matrix3d>& layer_R_tools,
+    const SDFGrid& sdf_full,
+    double current_layer_max_z,
+    const NozzleCylinderParams& params);
+
+// transition keypoint 单独检查（§16 调用）
+bool checkTransitionCollision(
+    const std::array<TrajectoryPoint, 4>& keypoints,
+    const SDFGrid& sdf_full,
+    double layer_max_z,                      // = max(layer_N, layer_N+1) max z
+    const NozzleCylinderParams& params);
+```
+
+### §17.7 验收
+
+- **单元测试**（已知碰撞 case）：构造 cylinder + 已知 SDF，验证算法返回正确 status + min_distance
+- **三模型预检**：mao / armadillo / bunny 各层碰撞率应当 < 5%（典型几何下喷头本体不应频繁撞）
+- **极端 case**：构造一个高度悬出的 STL（如人像伸出的手臂），确认 §17 能识别"喷头本体撞悬挂部分"
+- **transition 验收**：5 层 + 4 transitions 的 mao 子集，所有 transition keypoints 通过率 100%
+
+### §17.8 工程量
+
+- 圆柱采样 + SDF 查询：~120 LOC
+- 整层检查 + 两级阈值：~80 LOC
+- transition keypoint 单独检查：~40 LOC
+- 单元测试（含 fixture）：~120 LOC
+- **总 ~360 LOC，3 天**
+
+## §18 测试策略（部分已 brainstorm，2026-05-10）
+
+设计目标：单元测试（每个模块）+ 三模型 phase3 集成测试（mao / armadillo / bunny）+ KRL 模拟器验证 + RSI 协议双端一致性验证 + 现场联调。完整 brainstorm 待续。
+
+### §18.1 RSI 协议双端一致性测试（OPEN-8 验收，2026-05-10 拍板）
+
+由于现役 RSI 配置是 POSCORR（笛卡尔），改造为 AXISCORR（关节角）后必须严格验证双端协议一致：
+
+| 测试 | 内容 | 通过标准 |
+|------|------|---------|
+| **T1 loopback** | 本机起 mock KUKA 服务器（Python pugixml 解析回包），PC 发 1 万周期 | 每个 `<AK A1..A6>` 字段顺序、数值（精度 1e-6）、IPOC 与 mock 接收一致；零包丢失 |
+| **T2 KUKA 单向收** | KUKA 端只接收不动作（用 RSI logging），PC 发 100 周期 | 导出 KUKA `RSI.log`，每帧 `AK.A1..A6` 数值与 PC 发出值一致到 1e-4 |
+| **T3 KUKA 闭环移动** | 发送已知小幅度增量序列（每帧 A1 += 0.01°，1000 周期） | KUKA A1 实际转 10° ± 0.05°（误差含齿隙 + 编码器精度） |
+| **T4 超时容忍** | 故意丢包 5%（PC 端不回某些帧） | KUKA 不停机（在 Timeout=100 容忍范围内）；丢包率达 10% 时 KUKA 应报警 |
+| **T5 IPOC 同步** | PC 故意回错的 IPOC（如 +1 偏移） | KUKA 应报错并停机，**而不是**默默执行错误增量 |
+
+T1 由 CLI #2 实现（纯本机，可自动化）。T2-T5 必须现场实测（用户 + CLI #1 协调）。
+
+### §18.2 其他测试目标（待 §18 完整 brainstorm）
+
+- 单元测试：每个 §11/§12/§13/§14 模块的关键函数，覆盖 OK/边界/异常路径
+- 集成测试：mao / armadillo / bunny 三模型走完整 pipeline，输出 KRL + 可视化
+- KRL 模拟器：用 KUKA OfficeLite 或 KUKAVARPROXY 离线跑生成的 .src，确认无 fault
+- 性能基准：每个模型从 STL 输入到 KRL 输出的总时间 < 30 min
+
+---
+
+## §19 遗留问题清单（OPEN-* 登记）
+
+| ID | 问题 | 当前默认 | 状态 | 解决时机 |
+|----|------|---------|------|---------|
+| OPEN-1 | 在线协议走笛卡尔 RKorr 还是关节角 AKorr | AKorr (关节角) | ✅ **已解 2026-05-07** | — |
+| OPEN-2 | RSI `<EStr>` 字段语义 | 空字符串 | 待联调 | §15b 联调期 |
+| OPEN-3 | RSI 周期 4ms 还是 12ms | 4ms (IPO_FAST 默认) | ✅ **已解 2026-05-10**（RSI.src 第 168-170 行 + RSI_Ethernet.src 第 50 行 RSI_ON(#RELATIVE) 默认 sensorMode=#IPO_FAST 已确证） | — |
+| OPEN-4 | `$SEN_PREA[1..5]` 用途 | 未用 | 仅扩展时相关，新版 RSI 不需要 | — |
+| OPEN-5 | AXISCORR 默认 ±5° 安全限是否需调高 | 不调，按默认 | 联调期 | §15b 联调期 |
+| OPEN-6 | KUKA 端是否残留旧 UDP listener | 无残留 (现场仅 RSI) | ✅ **已解 2026-05-07** | — |
+| OPEN-7 | `$VEL_AXIS[*]` 最优值 | 80% | 联调期 | §15a 联调期 |
+| OPEN-8 | RSI 配置改造 (POSCORR → AXISCORR) 部署方 | CLI #2 写文本 + 用户用 RSIVisual 部署，配套 §18.1 五项测试验收 | 待启动 | §15b 实现前 |
+| OPEN-9 | AXISCORR 模式下 `integrationSystem` 是否被忽略 | 假设忽略 (关节空间无坐标系概念)；CLI #2 实现时直接不传该参数试 | 待 KUKA 实测验证 | §15b 联调期 |
+| OPEN-10 | 喷头几何参数 r/h | 用户待测 | 待用户测量 | §17 启动前 |
+| OPEN-11 | 现役 KUKA 控制器 KSS 版本 (影响 RSI 1.0 vs 1.1 vs 5.0 语法差异) | 假设 KSS 8.6/8.7 (RSI 5.0 兼容 1.1 语法) | 待用户现场示教器查（HMI → Help → Info → System info） | §15b 联调前 |
+| **OPEN-12（新 2026-05-10）** | `$TOOL` / `$BASE` 编号 + `tool_z_offset` + `platform_z_offset` 等标定相关参数应当 UI 可调 | 当前在 toml 硬编码（tool_no=8, base_no=6, z_offset=0.28），每次重新标定需手改 toml | 设计待办 | UI 阶段（v4 之后） |
+
+---
+
+*v4 §10-§15 修订（2026-05-07 七次）：完成 KUKA 6 轴 FDM 曲面打印的算法重构 + 硬件输出对接。BC 选择推翻 SDF normal 方案，改用几何 z 坐标 (§10)。MATLAB 链路彻底删除，6 轴解析 IK 移入 C++ (§11)。可达性检查升级为双层结构 (§12)。路径策略从 XY scanline 改为曲面测地等值线 (§13)。轨迹平滑用 5 次多项式 + 双时间约束 (§14)。输出双格式：离线 KRL + 在线 RSI 关节角 AKorr 协议 (§15)。RSI 配置需要从 POSCORR 改造为 AXISCORR，由 CLI #2 自动生成新配置文件，用户用 RSIVisual 部署。**§16-§17 brainstorm 待续，§18 测试策略已部分定稿（§18.1 RSI 双端一致性 5 项测试）。***
+
+*2026-05-10 §10-§18 细节补丁（用户 review 第一轮反馈）：
+- §10 顶面 BC 改为 Dirichlet phi=1（取代 free Neumann），追求层厚均匀
+- §11.2 路径切线方向规范化：让 tool_y 指向工件外侧
+- §13.2.1 闭合等值线起点 + 方向约定（z 最小点 + 工件外侧导向）
+- §15.2.1 KRL 全程 PTP 不用 LIN；送丝按层级开关（方案 X）；禁用 $APO.CPTP blending
+- §18.1 完成 RSI 协议双端一致性 5 项测试设计（OPEN-8 验收依据）
+- OPEN-3 关闭（4ms 已确证）；OPEN-12 新增（$TOOL/$BASE UI 可调）；其他 OPEN 进度更新*
+
+*2026-05-10 §16-§17 brainstorm 完成（八次修订）：
+- §16 层间衔接定型：⊓ 形 4-keypoint，自适应 lift_z = max(N, N+1) + 5mm，转移速度 25 mm/s（打印 5 mm/s 的 5×）
+- §17 喷头碰撞检查定型：圆柱体 (r=10mm, h=30mm 默认，OPEN-10 待测) + 动态裁剪 SDF（只查当前层 z 以下）+ 两级阈值（30% 跳层，与 §12 一致）+ 预平滑时机（§14 之前一次主筛 + transitions 单独）
+- §17.5 更新 pipeline 数据流图：§12 → §17 path-level → §16 insert → §17 transition-level → §14 → §15
+- §16 + §17 总工程量 ~620 LOC, 5 天
+- v4 §10-§17 至此**主体设计完整**，§18 测试策略 §18.1 已定，§18.2-§18.X 待补*
