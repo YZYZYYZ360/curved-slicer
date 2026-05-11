@@ -60,6 +60,7 @@ add_library(curved_slicer_phase0
     src/field/field_smoothing.cpp
     src/kinematics/forward_kin.cpp
     src/kinematics/ik_solver.cpp
+    src/path/pose_from_path.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -202,3 +203,13 @@ configure_phase0_test(ik_solver_unit_test)
 target_link_libraries(ik_solver_unit_test PRIVATE Eigen3::Eigen)
 
 add_test(NAME ik_solver_unit COMMAND ik_solver_unit_test)
+
+add_executable(pose_from_path_unit_test
+    tests/pose_from_path_unit_test.cpp
+)
+
+configure_phase0_test(pose_from_path_unit_test)
+
+target_link_libraries(pose_from_path_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME pose_from_path_unit COMMAND pose_from_path_unit_test)

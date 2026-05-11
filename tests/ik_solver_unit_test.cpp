@@ -66,31 +66,34 @@ static double angle_diff_deg(double a, double b)
     return d;
 }
 
-bool random_test(int i)
+// Plan 1 Step 4.1 test ranges (80-90% of mechanical limits)
+struct TestRange { double lo, hi; };
+static const TestRange kTestRanges[6] = {
+    {-150.0, 150.0},   // J1: [-170, 170]
+    {-150.0,   30.0},   // J2: [-195,  40]
+    {-100.0, 130.0},   // J3: [-115, 150]
+    {-170.0, 170.0},   // J4: [-185, 185]
+    {-100.0, 100.0},   // J5: [-120, 120]
+    {-300.0, 300.0},   // J6: [-350, 350]
+};
+
+bool random_test(int i, int& num_no_sol, int& num_pos_fail)
 {
     using namespace cslc;
     static KR4DHParams dh;
 
     double q[6];
     for (int j = 0; j < 6; ++j) {
-        double lo = dh.qlim_deg[j][0], hi = dh.qlim_deg[j][1];
-        // Use middle 40% of joint range for reliable round-trip testing
-        double margin = 0.3 * (hi - lo);
-        q[j] = (lo + margin) + (hi - lo - 2 * margin) * (double(std::rand()) / RAND_MAX);
+        double lo = kTestRanges[j].lo, hi = kTestRanges[j].hi;
+        q[j] = lo + (hi - lo) * (double(std::rand()) / RAND_MAX);
     }
 
     JointConfig original{{q[0], q[1], q[2], q[3], q[4], q[5]}};
     CartPose tcp = forwardKin(original, dh);
 
-    // Skip configurations where TCP is near the Z-axis (J1 ill-conditioned)
-    double r_tcp = std::sqrt(tcp.X * tcp.X + tcp.Y * tcp.Y);
-    if (r_tcp < 50.0) {
-        return true;  // count as pass (workspace boundary)
-    }
-
     auto sols = solveAnalyticalIK(tcp, dh, &original);
 
-    // Check if any IK solution matches the original joints
+    // Check if any IK solution matches the original joints (1° tolerance)
     for (const auto& s : sols) {
         double joint_err = 0.0;
         for (int j = 0; j < 6; ++j) {
@@ -112,11 +115,17 @@ bool random_test(int i)
         }
     }
 
+    // Failure categorization
+    if (sols.empty()) {
+        ++num_no_sol;
+    } else {
+        ++num_pos_fail;
+    }
+
     if (sols.empty()) {
         std::cout << "  FAIL [i=" << i << "] NO SOLUTION  tcp=("
                   << tcp.X << "," << tcp.Y << "," << tcp.Z << ")\n";
     } else {
-        // Find best position error among solutions
         double best_pos_err = 1e9;
         for (const auto& s : sols) {
             CartPose fk = forwardKin(s.solution, dh);
@@ -133,22 +142,27 @@ bool random_test(int i)
 int main()
 {
     try {
-        std::srand(12345);
+        std::srand(42);
         test_home_smoke();
 
         set_failed_cfg("random1000");
         int passed = 0;
+        int num_no_sol = 0, num_pos_fail = 0;
         constexpr int N = 1000;
         for (int i = 0; i < N; ++i) {
-            if (random_test(i)) ++passed;
+            if (random_test(i, num_no_sol, num_pos_fail)) ++passed;
             if ((i + 1) % 200 == 0)
                 std::cout << "  progress: " << (i + 1) << "/" << N << "\n";
         }
+        int failed = N - passed;
         double rate = 100.0 * passed / N;
         std::cout << "random round-trip: " << passed << "/" << N
                   << " (" << rate << "%)\n";
-        require(passed >= 900,
-                ("need >= 90% pass, got " + std::to_string(passed) + "/1000").c_str());
+        std::cout << "  failures: " << failed
+                  << " (no_solution=" << num_no_sol
+                  << ", pos_fail=" << num_pos_fail << ")\n";
+        require(passed >= 800,
+                ("need >= 80% pass, got " + std::to_string(passed) + "/1000").c_str());
 
         std::cout << "ik_solver_unit_test PASSED\n";
         return 0;

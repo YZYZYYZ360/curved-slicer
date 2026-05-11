@@ -14,7 +14,7 @@ namespace {
 
 constexpr double kRad2Deg = 180.0 / M_PI;
 constexpr double kDeg2Rad = M_PI / 180.0;
-constexpr double kSingularityDeg = 1.0;
+constexpr double kSingularityDeg = 5.0;
 
 double sq(double x) { return x * x; }
 
@@ -38,7 +38,7 @@ bool joints_in_limits(const double q_rad[6], const std::array<std::array<double,
 {
     for (int i = 0; i < 6; ++i) {
         double deg = q_rad[i] * kRad2Deg;
-        if (deg < qlim_deg[i][0] - 0.1 || deg > qlim_deg[i][1] + 0.1) {
+        if (deg < qlim_deg[i][0] - 1e-3 || deg > qlim_deg[i][1] + 1e-3) {
             return false;
         }
     }
@@ -81,7 +81,7 @@ J2J3Solution solve_single_j2j3(double R, double Z, double a2,
 
     double W = R * R + Z * Z + L3_eff * L3_eff - a2 * a2;
     double rhs = W / (2.0 * L3_eff * D);
-    if (rhs < -1.0 || rhs > 1.0) return sol;
+    rhs = std::clamp(rhs, -1.0, 1.0);
 
     double gamma = std::atan2(-Z, R);
     double asin_val = std::asin(rhs);
@@ -111,7 +111,7 @@ J2J3Solution solve_single_j2j3(double R, double Z, double a2,
 bool decompose_j456(const Eigen::Matrix3d& R_456, bool wrist_flip,
                     double& j4, double& j5, double& j6)
 {
-    double cos_j5 = R_456(2, 2);
+    double cos_j5 = std::clamp(R_456(2, 2), -1.0, 1.0);
     double sin_j5_sq = 1.0 - sq(cos_j5);
 
     if (sin_j5_sq < 1e-10) {
@@ -178,7 +178,18 @@ std::vector<IKSolution> solveIKAll(
     double delta = std::atan2(a3, d4);
 
     // J1 from wrist center
-    double j1_front = std::atan2(wy, wx);
+    // When wrist center is near the A1 rotation axis (r_xy small), atan2 is
+    // numerically unstable — any A1 angle is geometrically valid.  Fall back
+    // to the reference J1 in that case (standard textbook treatment).
+    constexpr double kBaseAxisThresholdMm = 30.0;
+    double r_xy = std::sqrt(wx * wx + wy * wy);
+    double j1_base;
+    if (r_xy < kBaseAxisThresholdMm && reference) {
+        j1_base = reference->q_deg[0] * kDeg2Rad;
+    } else {
+        j1_base = std::atan2(wy, wx);
+    }
+    double j1_front = j1_base;
     double j1_back = normalize_angle(j1_front + M_PI);
 
     // Collect J1 candidates: front, back, and optionally reference
@@ -227,9 +238,6 @@ std::vector<IKSolution> solveIKAll(
         double theta3 = pos_sols[pi].theta3;
 
         // Build R03 using DH convention (matches forward_kin.cpp)
-        // R01: θ1, α1=π/2 → [c1, 0, s1; s1, 0, -c1; 0, 1, 0]
-        // R12: θ2, α2=π   → [c2, s2, 0; s2, -c2, 0; 0, 0, -1]
-        // R23: θ3, α3=-π/2 → [c3, 0, -s3; s3, 0, c3; 0, -1, 0]
         double c1 = std::cos(j1), s1 = std::sin(j1);
         double c2 = std::cos(theta2), s2 = std::sin(theta2);
         double c3 = std::cos(theta3), s3 = std::sin(theta3);
@@ -258,7 +266,10 @@ std::vector<IKSolution> solveIKAll(
             double j4, j5, j6;
             if (!decompose_j456(R_456, wf == 1, j4, j5, j6)) continue;
 
-            double q_rad[6] = {j1, theta2, theta3, j4, j5, j6};
+            // Normalize θ₂,θ₃ to [-π,π] before limit check.
+            // α₂=π DH convention can push θ₃ outside [-π,π] via θ₂-θ₃ coupling.
+            double q_rad[6] = {j1, normalize_angle(theta2), normalize_angle(theta3),
+                               j4, j5, j6};
             if (!joints_in_limits(q_rad, dh.qlim_deg)) continue;
 
             // Singularity check
