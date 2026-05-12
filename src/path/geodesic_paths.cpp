@@ -52,11 +52,12 @@ static std::vector<PathPolyline> stitchEdgesToPolylines(
     // at the same geometric position for adjacent triangles.
     auto canonical = mergeVertices(iV, 1e-4);
 
-    // Remap edges through canonical mapping
+    // Remap edges through canonical mapping, filtering self-loops
     std::vector<std::pair<int,int>> mapped;
     mapped.reserve(edges.size());
     for (auto& e : edges) {
-        mapped.push_back({canonical[e.first], canonical[e.second]});
+        int a = canonical[e.first], b = canonical[e.second];
+        if (a != b) mapped.push_back({a, b});
     }
 
     // Build adjacency: canonical_vertex → list of (neighbor, edge_index)

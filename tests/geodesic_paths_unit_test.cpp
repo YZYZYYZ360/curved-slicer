@@ -194,6 +194,43 @@ void test_tangents()
     std::cout << "  test_tangents PASSED\n";
 }
 
+// Verification C: finer mesh (32 triangles) to check if igl::isolines
+// produces complete rings at higher resolution.
+void test_finer_mesh()
+{
+    using namespace cslc;
+
+    const int n_ring = 32;
+    const double R = 10.0;
+    Eigen::MatrixXd V;
+    Eigen::MatrixXi F;
+    buildDiskMesh(n_ring, R, V, F);
+
+    GeodesicPathParams params;
+    params.line_spacing_mm = 2.0;
+
+    auto paths = generateGeodesicPaths(V, F, params);
+
+    int closed_count = 0;
+    int total_count = static_cast<int>(paths.size());
+    for (auto& p : paths) {
+        if (p.is_closed) closed_count++;
+    }
+
+    std::cout << "  finer_mesh(32): total=" << total_count
+              << " closed=" << closed_count << "\n";
+    for (size_t i = 0; i < paths.size(); ++i) {
+        std::cout << "    path[" << i << "]: " << paths[i].points.size()
+                  << " pts, closed=" << paths[i].is_closed
+                  << ", length=" << paths[i].total_length_mm << "\n";
+    }
+
+    // Expect at least 1 closed ring (innermost)
+    require(closed_count >= 1, "finer_mesh: at least 1 closed ring");
+
+    std::cout << "  test_finer_mesh PASSED\n";
+}
+
 int main()
 {
     try {
@@ -201,6 +238,7 @@ int main()
         test_closed_ring();
         test_start_point();
         test_tangents();
+        test_finer_mesh();
         std::cout << "geodesic_paths_unit_test PASSED\n";
         return 0;
     } catch (const std::exception& e) {
