@@ -307,3 +307,15 @@ configure_phase0_test(poly5_smoother_unit_test)
 target_link_libraries(poly5_smoother_unit_test PRIVATE Eigen3::Eigen)
 
 add_test(NAME poly5_smoother_unit COMMAND poly5_smoother_unit_test)
+
+add_executable(v4_pipeline_e2e_test
+    tests/v4_pipeline_e2e_test.cpp
+)
+
+configure_phase0_test(v4_pipeline_e2e_test)
+
+target_link_libraries(v4_pipeline_e2e_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME v4_pipeline_e2e COMMAND v4_pipeline_e2e_test)
+
+set_tests_properties(v4_pipeline_e2e PROPERTIES TIMEOUT 1800)

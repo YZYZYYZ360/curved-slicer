@@ -1,0 +1,134 @@
+# mao_rescaled v4: vector_kuka_v4 pipeline with §10-§14 integration
+
+[io]
+output_root              = "../runs/v4_mao_rescaled"
+runs_csv                 = "../runs/v4_mao_rescaled/runs.csv"
+debug_dump_intermediates = true
+
+[[io.models]]
+name     = "mao_rescaled"
+stl_path = "../tests/models/毛主席头雕(42_52_70)_1_Rescaled(0.7).stl"
+
+[voxel]
+spacing_mm   = 0.5
+padding_mm   = 0.0
+sdf_band_mm  = 1.0
+
+[field.boundary]
+strategy             = "geometric_z"
+print_direction      = [0.0, 0.0, 1.0]
+bottom_band_mm       = -1.0
+top_band_mm          = -1.0
+band_min_mm          = 0.5
+band_max_mm          = 5.0
+
+[algorithm]
+pipeline = "vector_kuka_v4"
+
+[algorithm.field.laplacian]
+max_iterations      = 2000
+tolerance           = 1e-6
+normalize_each_iter = false
+
+[algorithm.field.poisson]
+max_iterations   = 500
+tolerance        = 1e-6
+use_precondition = true
+
+[algorithm.field.smoothing]
+passes          = 0
+center_weight   = 1.0
+neighbor_weight = 1.0
+preserve_bc     = true
+
+[iso_surface]
+layer_thickness_mm = 0.2
+iso_spacing        = "uniform"
+max_layers         = 500
+phi_start_offset   = 0.0
+
+[path]
+strategy               = "scanline"
+line_spacing_mm        = 0.4
+contour_resample_mm    = 0.2
+smooth_position_window = 5
+
+[path.geodesic]
+line_spacing_mm   = 2.0
+resample_step_mm  = 1.0
+seed_strategy     = "centroid"
+
+[path.smooth_orientation]
+lambda_data   = 1.0
+lambda_smooth = 10.0
+
+[kuka.limits.a1]
+min_deg = -170.0
+max_deg =  170.0
+speed_deg_per_s = 336.0
+
+[kuka.limits.a2]
+min_deg = -195.0
+max_deg =   40.0
+speed_deg_per_s = 336.0
+
+[kuka.limits.a3]
+min_deg = -115.0
+max_deg =  150.0
+speed_deg_per_s = 488.0
+
+[kuka.limits.a4]
+min_deg = -185.0
+max_deg =  185.0
+speed_deg_per_s = 600.0
+
+[kuka.limits.a5]
+min_deg = -120.0
+max_deg =  120.0
+speed_deg_per_s = 529.0
+
+[kuka.limits.a6]
+min_deg = -350.0
+max_deg =  350.0
+speed_deg_per_s = 800.0
+
+[kuka.home]
+q_deg = [0.0, -30.0, 30.0, 0.0, 45.0, 0.0]
+
+[kuka.robot]
+status      = 4
+turn        = 28
+tool_no     = 8
+base_no     = 6
+platform_x  = 0.0
+platform_y  = 0.0
+platform_z  = 0.0
+z_offset    = 0.28
+robot_ini_abc = [0.0, 0.0, 0.0]
+
+[kuka.reachability]
+workpiece_up      = [0.0, 0.0, 1.0]
+min_dot_threshold = 0.05
+
+[kuka.world_to_base]
+world_to_base = [
+  [1.0, 0.0, 0.0, 0.0],
+  [0.0, 1.0, 0.0, 0.0],
+  [0.0, 0.0, 1.0, 0.0],
+  [0.0, 0.0, 0.0, 1.0],
+]
+
+[trajectory]
+target_line_speed_mm_per_s    = 5.0
+sample_period_ms              = 4.0
+max_joint_velocity_deg_per_s  = 200.0
+max_joint_accel_deg_per_s2    = 500.0
+max_joint_delta_per_cycle_deg = 3.0
+
+[metrics]
+enabled          = true
+sample_layer_ids = []
+output_per_layer = true
+
+[logging]
+level = "info"

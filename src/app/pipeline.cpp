@@ -4,8 +4,15 @@
 #include "field/laplacian.h"
 #include "geometry/sdf.h"
 #include "geometry/voxel_grid.h"
+#include "kinematics/dh_params.h"
+#include "kinematics/forward_kin.h"
+#include "kinematics/ik_solver.h"
+#include "kinematics/reachability.h"
 #include "metrics/curvature.h"
+#include "path/geodesic_paths.h"
+#include "path/pose_from_path.h"
 #include "surface/iso_surface.h"
+#include "trajectory/poly5_smoother.h"
 
 #include <algorithm>
 #include <array>
@@ -1090,8 +1097,55 @@ BatchReport runBatch(const PipelineConfig& config)
                     writeGFieldPly(grid, clamped, dump_dir / "g_field.ply");
                     std::cout << "[" << report.name << "] dumping done\n" << std::flush;
                 }
+            } else if (report.pipeline == "vector_kuka_v4") {
+                // v4 pipeline: same field computation as vector_kuka, then
+                // geodesic paths → IK → trajectory smoothing → CSV output
+                const auto laplacian_start = Clock::now();
+                const LaplacianVectorBC bc = generateVectorBC(grid, sdf, config.field_boundary);
+                LaplacianParams laplacian_params = config.algorithm.field.laplacian;
+                const VectorField vector_field = solveLaplacianVector(grid, bc, laplacian_params);
+                const auto laplacian_end = Clock::now();
+                laplacian_ms = elapsedMs(laplacian_start, laplacian_end);
+
+                const auto poisson_start = Clock::now();
+                const VectorField clamped = projectToHemisphere(grid, vector_field, config.kuka.reachability);
+                report.m2_hemisphere_violation_ratio =
+                    hemisphereViolationRatio(grid, clamped, config.kuka.reachability);
+
+                const VectorField* poisson_input = &clamped;
+                VectorField smoothed_field;
+                if (config.algorithm.field.smoothing.passes > 0) {
+                    smoothed_field = smoothVectorField(grid, clamped, bc,
+                                                       config.algorithm.field.smoothing);
+                    poisson_input = &smoothed_field;
+                }
+
+                PoissonParams poisson_params = config.algorithm.field.poisson;
+                const Vec3 print_dir = printDirection(config.field_boundary);
+                for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
+                    if (!bc.bc_zones.empty()) {
+                        poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                        poisson_params.anchor_values.push_back(
+                            bc.bc_zones[i] == BCZone::Bottom ? 0.0 : 1.0);
+                    } else {
+                        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+                        if (norm(diff) < 1e-6) {
+                            poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                            poisson_params.anchor_values.push_back(0.0);
+                        }
+                    }
+                }
+                poisson_params.log_iterations = true;
+                poisson_params.progress_label = report.name;
+                phi = solvePoisson(grid, *poisson_input, poisson_params);
+                gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary,
+                                                    !poisson_params.anchor_voxels.empty());
+                has_gauge_diagnostics = true;
+                const auto poisson_end = Clock::now();
+                poisson_ms = elapsedMs(poisson_start, poisson_end);
+                phi_is_normalized = false;
             } else {
-                throw std::runtime_error("algorithm.pipeline must be scalar or vector_kuka");
+                throw std::runtime_error("algorithm.pipeline must be scalar, vector_kuka, or vector_kuka_v4");
             }
 
             validatePhi(phi);
@@ -1140,6 +1194,127 @@ BatchReport runBatch(const PipelineConfig& config)
                 &report.component_details,
                 &report.component_summary);
             const auto iso_end = Clock::now();
+
+            // v4 trajectory generation (§14 + §17.5)
+            if (report.pipeline == "vector_kuka_v4") {
+                const auto traj_start = Clock::now();
+                std::cout << "[" << report.name << "] trajectory generation begin\n" << std::flush;
+
+                KR4DHParams dh;
+                for (int i = 0; i < 6; ++i) {
+                    dh.qlim_deg[i][0] = config.kuka.limits[i].min_deg;
+                    dh.qlim_deg[i][1] = config.kuka.limits[i].max_deg;
+                }
+                dh.tool_z_mm = config.kuka.robot.z_offset;
+
+                JointConfig home;
+                home.q_deg = config.kuka.home.q_deg;
+
+                const Vec3 G_dir = normalized(config.kuka.reachability.workpiece_up);
+
+                // Collect all PathPointWithJoints across layers, splitting at NaN
+                std::vector<std::vector<PathPointWithJoints>> segments;
+                segments.emplace_back();
+
+                for (const auto& iso_mesh : layer_meshes) {
+                    if (iso_mesh.vertices.empty() || iso_mesh.triangles.empty()) continue;
+
+                    // Convert IsoMesh to Eigen matrices for geodesic paths
+                    const int nv = static_cast<int>(iso_mesh.vertices.size());
+                    const int nf = static_cast<int>(iso_mesh.triangles.size());
+                    Eigen::MatrixXd V(nv, 3);
+                    for (int i = 0; i < nv; ++i) {
+                        V(i, 0) = iso_mesh.vertices[i].x;
+                        V(i, 1) = iso_mesh.vertices[i].y;
+                        V(i, 2) = iso_mesh.vertices[i].z;
+                    }
+                    Eigen::MatrixXi F(nf, 3);
+                    for (int i = 0; i < nf; ++i) {
+                        F(i, 0) = static_cast<int>(iso_mesh.triangles[i].v0);
+                        F(i, 1) = static_cast<int>(iso_mesh.triangles[i].v1);
+                        F(i, 2) = static_cast<int>(iso_mesh.triangles[i].v2);
+                    }
+
+                    auto geodesic_paths = generateGeodesicPaths(V, F, config.geodesic);
+
+                    for (const auto& poly : geodesic_paths) {
+                        if (poly.points.size() < 2) continue;
+
+                        // Build point + tangent arrays for IK
+                        std::vector<Vec3> pts, tans;
+                        pts.reserve(poly.points.size());
+                        tans.reserve(poly.tangents.size());
+                        for (const auto& p : poly.points) {
+                            pts.push_back({p.x(), p.y(), p.z()});
+                        }
+                        for (const auto& t : poly.tangents) {
+                            tans.push_back({t.x(), t.y(), t.z()});
+                        }
+
+                        auto reach_result = filterReachablePathPoints(
+                            pts, tans, G_dir, dh, config.kuka.reachability);
+
+                        // Assemble PathPointWithJoints, split at unreachable points
+                        for (size_t i = 0; i < pts.size(); ++i) {
+                            if (reach_result.statuses[i] == ReachStatus::OK) {
+                                PathPointWithJoints pp;
+                                pp.cart_pos = poly.points[i];
+                                pp.joint = reach_result.solutions[i];
+                                pp.wire_on = true;
+                                segments.back().push_back(pp);
+                            } else {
+                                // NaN: start new segment
+                                if (segments.back().size() > 1) {
+                                    segments.emplace_back();
+                                } else if (!segments.back().empty()) {
+                                    segments.back().clear();
+                                }
+                            }
+                        }
+                        // Start new segment between polylines
+                        if (segments.back().size() > 1) {
+                            segments.emplace_back();
+                        } else if (!segments.back().empty()) {
+                            segments.back().clear();
+                        }
+                    }
+                }
+
+                // Remove empty segments
+                segments.erase(
+                    std::remove_if(segments.begin(), segments.end(),
+                                   [](const auto& s) { return s.size() < 2; }),
+                    segments.end());
+
+                // Smooth each segment and write trajectory.csv
+                const std::filesystem::path traj_path = model_dir / "trajectory.csv";
+                std::ofstream csv(traj_path);
+                csv << "timestamp_ms,segment_id,A1,A2,A3,A4,A5,A6,wire_on\n";
+
+                int total_traj_points = 0;
+                int segment_id = 0;
+                for (const auto& seg : segments) {
+                    ++segment_id;
+                    auto traj = smoothTrajectoryPoly5(seg, config.trajectory);
+                    for (const auto& pt : traj) {
+                        csv << std::fixed << std::setprecision(6)
+                            << pt.timestamp_ms << "," << segment_id << ","
+                            << pt.joint_deg[0] << "," << pt.joint_deg[1] << ","
+                            << pt.joint_deg[2] << "," << pt.joint_deg[3] << ","
+                            << pt.joint_deg[4] << "," << pt.joint_deg[5] << ","
+                            << (pt.wire_on ? 1 : 0) << "\n";
+                        ++total_traj_points;
+                    }
+                }
+                csv.close();
+
+                const auto traj_end = Clock::now();
+                std::cout << "[" << report.name << "] trajectory done: "
+                          << total_traj_points << " points, "
+                          << segment_id << " segments, "
+                          << std::fixed << std::setprecision(1)
+                          << elapsedMs(traj_start, traj_end) << "ms\n" << std::flush;
+            }
 
             report.success = true;
             report.message = "ok";
@@ -1247,7 +1422,7 @@ void printBatchReport(const BatchReport& report, std::ostream& output)
                        << " phi_min=" << model.phi_min
                        << " phi_max=" << model.phi_max
                        << '\n';
-                if (model.pipeline == "vector_kuka") {
+                if (model.pipeline == "vector_kuka" || model.pipeline == "vector_kuka_v4") {
                     output << "  phi_diagnostic min_voxel=(" << model.phi_min_voxel.x << ','
                            << model.phi_min_voxel.y << ',' << model.phi_min_voxel.z << ")"
                            << " min_point=(" << model.phi_min_point.x << ','

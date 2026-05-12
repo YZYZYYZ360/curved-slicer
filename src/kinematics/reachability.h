@@ -3,22 +3,14 @@
 #include "kinematics/cart_pose.h"
 #include "kinematics/dh_params.h"
 #include "geometry/voxel_grid.h"
-#include "field/laplacian.h"
+#include "field/kuka_projection.h"
 
 #include <array>
 #include <vector>
 
 namespace cslc {
 
-// Reachability parameters (defaults from v4 spec §12.3)
-struct ReachabilityParams {
-    double workspace_r_min_mm          = 100.0;
-    double workspace_r_max_mm          = 600.0;
-    double singularity_a5_deg          = 5.0;
-    double singularity_shoulder_deg    = 5.0;
-    double layer_skip_threshold        = 0.30;
-    double arm_flip_threshold_deg      = 90.0;
-};
+// ReachabilityParams is defined in field/kuka_projection.h (shared struct).
 
 enum class ReachStatus : uint8_t {
     OK              = 0,
