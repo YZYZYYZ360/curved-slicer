@@ -81,6 +81,7 @@ add_library(curved_slicer_phase0
     src/kinematics/reachability.cpp
     src/path/pose_from_path.cpp
     src/path/geodesic_paths.cpp
+    src/path/path_postprocessing.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -285,3 +286,13 @@ configure_phase0_test(geodesic_paths_unit_test)
 target_link_libraries(geodesic_paths_unit_test PRIVATE Eigen3::Eigen igl::core)
 
 add_test(NAME geodesic_paths_unit COMMAND geodesic_paths_unit_test)
+
+add_executable(path_postprocessing_unit_test
+    tests/path_postprocessing_unit_test.cpp
+)
+
+configure_phase0_test(path_postprocessing_unit_test)
+
+target_link_libraries(path_postprocessing_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME path_postprocessing_unit COMMAND path_postprocessing_unit_test)
