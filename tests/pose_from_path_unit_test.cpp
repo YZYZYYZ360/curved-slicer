@@ -87,11 +87,13 @@ void test_near_parallel()
                 "near_parallel: tool_z = (0,0,-1)");
     }
 
-    // Truly parallel: tangent = (0,0,1) → should return identity
+    // Truly parallel: tangent = (0,0,1) → should return valid rotation (not identity)
     Eigen::Vector3d t_par(0, 0, 1);
     Eigen::Matrix3d R_par = constructToolFrame(t_par, G);
-    require((R_par - Eigen::Matrix3d::Identity()).norm() < 1e-9,
-            "near_parallel: exact parallel → identity");
+    require(std::abs(R_par.determinant() - 1.0) < 1e-9,
+            "near_parallel: exact parallel → valid rotation");
+    require(vec_err(R_par.col(2), Eigen::Vector3d(0, 0, -1)) < 1e-9,
+            "near_parallel: exact parallel → tool_z = (0,0,-1)");
 
     std::cout << "  near_parallel PASSED\n";
 }

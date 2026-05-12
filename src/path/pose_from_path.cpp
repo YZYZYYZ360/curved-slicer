@@ -13,12 +13,18 @@ Eigen::Matrix3d constructToolFrame(const Eigen::Vector3d& path_tangent,
     Eigen::Vector3d tool_x = t - (t.dot(tool_z)) * tool_z;
     double xn = tool_x.norm();
 
-    // Degenerate: tangent parallel to G_outward → no well-defined tool frame
     constexpr double kEps = 1e-6;
     if (xn < kEps) {
-        return Eigen::Matrix3d::Identity();
+        // Degenerate: tangent parallel to G_outward
+        // Pick an arbitrary direction perpendicular to tool_z
+        Eigen::Vector3d up(0, 0, 1);
+        if (std::abs(tool_z.dot(up)) > 0.9) {
+            up = Eigen::Vector3d(1, 0, 0);
+        }
+        tool_x = tool_z.cross(up).normalized();
+    } else {
+        tool_x /= xn;
     }
-    tool_x /= xn;
 
     Eigen::Vector3d tool_y = tool_z.cross(tool_x);
 

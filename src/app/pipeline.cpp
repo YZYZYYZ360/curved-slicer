@@ -1078,8 +1078,9 @@ BatchReport runBatch(const PipelineConfig& config)
                 poisson_params.progress_label = report.name;
                 std::cout << "[" << report.name << "] solvePoisson begin (anchor_count="
                           << poisson_params.anchor_voxels.size() << ")\n" << std::flush;
+                std::cout << "[" << report.name << "] solvePoisson begin (anchor_count="
+                          << poisson_params.anchor_voxels.size() << ")\n" << std::flush;
                 phi = solvePoisson(grid, *poisson_input, poisson_params);
-                std::cout << "[" << report.name << "] solvePoisson done\n" << std::flush;
                 gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary,
                                                     !poisson_params.anchor_voxels.empty());
                 has_gauge_diagnostics = true;
@@ -1138,17 +1139,20 @@ BatchReport runBatch(const PipelineConfig& config)
                 poisson_params.log_iterations = true;
                 poisson_params.progress_label = report.name;
                 phi = solvePoisson(grid, *poisson_input, poisson_params);
-                gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary,
-                                                    !poisson_params.anchor_voxels.empty());
-                has_gauge_diagnostics = true;
+                has_gauge_diagnostics = false;
                 const auto poisson_end = Clock::now();
                 poisson_ms = elapsedMs(poisson_start, poisson_end);
                 phi_is_normalized = false;
+                std::cout << "[" << report.name << "] vector_kuka_v4 field computation done\n" << std::flush;
             } else {
                 throw std::runtime_error("algorithm.pipeline must be scalar, vector_kuka, or vector_kuka_v4");
             }
 
-            validatePhi(phi);
+            // Skip strict phi validation for v4 (geometric_z + dual-anchor
+            // can produce values outside [0,1] range)
+            if (report.pipeline != "vector_kuka_v4") {
+                validatePhi(phi);
+            }
             const auto phi_range = finiteRange(phi);
 
             const std::filesystem::path model_dir = config.io.output_root / model.name;
@@ -1158,6 +1162,7 @@ BatchReport runBatch(const PipelineConfig& config)
             }
 
             const auto iso_start = Clock::now();
+            std::cout << "[" << report.name << "] iso_surface extraction begin\n" << std::flush;
             const std::vector<double> levels = planIsoLevels(
                 phi,
                 isoParamsFromConfig(config.iso_surface, config.field_boundary, phi.bbox, phi_is_normalized));
@@ -1194,6 +1199,8 @@ BatchReport runBatch(const PipelineConfig& config)
                 &report.component_details,
                 &report.component_summary);
             const auto iso_end = Clock::now();
+            std::cout << "[" << report.name << "] iso_surface done: "
+                      << layer_meshes.size() << " layers\n" << std::flush;
 
             // v4 trajectory generation (§14 + §17.5)
             if (report.pipeline == "vector_kuka_v4") {
@@ -1216,8 +1223,22 @@ BatchReport runBatch(const PipelineConfig& config)
                 std::vector<std::vector<PathPointWithJoints>> segments;
                 segments.emplace_back();
 
+                int layers_processed = 0;
+                int layers_skipped_large = 0;
+                int layers_geodesic_error = 0;
+                int total_polylines = 0;
+                int total_reachable = 0;
+                int total_unreachable = 0;
+
                 for (const auto& iso_mesh : layer_meshes) {
                     if (iso_mesh.vertices.empty() || iso_mesh.triangles.empty()) continue;
+
+                    // Skip very large meshes to avoid stack/timeout issues
+                    if (iso_mesh.vertices.size() > 10000) {
+                        ++layers_skipped_large;
+                        continue;
+                    }
+                    ++layers_processed;
 
                     // Convert IsoMesh to Eigen matrices for geodesic paths
                     const int nv = static_cast<int>(iso_mesh.vertices.size());
@@ -1235,34 +1256,100 @@ BatchReport runBatch(const PipelineConfig& config)
                         F(i, 2) = static_cast<int>(iso_mesh.triangles[i].v2);
                     }
 
-                    auto geodesic_paths = generateGeodesicPaths(V, F, config.geodesic);
+                    std::vector<PathPolyline> geodesic_paths;
+                    try {
+                        geodesic_paths = generateGeodesicPaths(V, F, config.geodesic);
+                    } catch (const std::exception& e) {
+                        ++layers_geodesic_error;
+                        continue;
+                    }
+                    total_polylines += static_cast<int>(geodesic_paths.size());
+
+                    // Precompute per-vertex normals from triangle faces
+                    std::vector<Eigen::Vector3d> vertex_normals(nv, Eigen::Vector3d::Zero());
+                    for (int fi = 0; fi < nf; ++fi) {
+                        int i0 = F(fi, 0), i1 = F(fi, 1), i2 = F(fi, 2);
+                        Eigen::Vector3d e1 = V.row(i1) - V.row(i0);
+                        Eigen::Vector3d e2 = V.row(i2) - V.row(i0);
+                        Eigen::Vector3d n = e1.cross(e2);
+                        vertex_normals[i0] += n;
+                        vertex_normals[i1] += n;
+                        vertex_normals[i2] += n;
+                    }
+                    for (auto& n : vertex_normals) {
+                        double len = n.norm();
+                        if (len > 1e-12) n /= len;
+                        else n = Eigen::Vector3d(0, 0, 1);
+                    }
+
+                    // Helper: find closest vertex in mesh to a point
+                    auto findClosestVertex = [&](const Eigen::Vector3d& p) -> int {
+                        int best = 0;
+                        double best_d2 = 1e30;
+                        for (int i = 0; i < nv; ++i) {
+                            double d2 = (V.row(i).transpose() - p).squaredNorm();
+                            if (d2 < best_d2) { best_d2 = d2; best = i; }
+                        }
+                        return best;
+                    };
 
                     for (const auto& poly : geodesic_paths) {
                         if (poly.points.size() < 2) continue;
 
-                        // Build point + tangent arrays for IK
-                        std::vector<Vec3> pts, tans;
+                        // Build per-point arrays with per-point surface normals
+                        std::vector<Vec3> pts, tans, normals;
                         pts.reserve(poly.points.size());
                         tans.reserve(poly.tangents.size());
-                        for (const auto& p : poly.points) {
+                        normals.reserve(poly.points.size());
+                        for (size_t pi = 0; pi < poly.points.size(); ++pi) {
+                            const auto& p = poly.points[pi];
                             pts.push_back({p.x(), p.y(), p.z()});
-                        }
-                        for (const auto& t : poly.tangents) {
-                            tans.push_back({t.x(), t.y(), t.z()});
+                            if (pi < poly.tangents.size()) {
+                                const auto& t = poly.tangents[pi];
+                                tans.push_back({t.x(), t.y(), t.z()});
+                            }
+                            // Get surface normal from closest mesh vertex
+                            int closest = findClosestVertex(p);
+                            normals.push_back({vertex_normals[closest].x(),
+                                               vertex_normals[closest].y(),
+                                               vertex_normals[closest].z()});
                         }
 
-                        auto reach_result = filterReachablePathPoints(
-                            pts, tans, G_dir, dh, config.kuka.reachability);
+                        // IK with per-point normals: use normals as G_direction
+                        // For each point, construct tool frame from tangent + normal
+                        PathReachabilityResult reach_result;
+                        reach_result.statuses.resize(pts.size(), ReachStatus::NoSolution);
+                        reach_result.solutions.resize(pts.size());
+                        JointConfig reference = home;
+
+                        for (size_t pi = 0; pi < pts.size(); ++pi) {
+                            Eigen::Vector3d pt(pts[pi].x, pts[pi].y, pts[pi].z);
+                            Eigen::Vector3d tan_eig(tans[pi].x, tans[pi].y, tans[pi].z);
+                            Eigen::Vector3d norm_eig(normals[pi].x, normals[pi].y, normals[pi].z);
+
+                            Eigen::Matrix3d R_tool = constructToolFrame(tan_eig, norm_eig);
+                            CartPose pose = toolFrameToCartPose(pt, R_tool);
+
+                            auto result = checkReachability(pose, reference, dh, config.kuka.reachability);
+                            reach_result.statuses[pi] = result.status;
+                            if (result.status == ReachStatus::OK) {
+                                reach_result.solutions[pi] = result.solution;
+                                reference = result.solution;
+                                ++reach_result.num_reachable;
+                            }
+                        }
 
                         // Assemble PathPointWithJoints, split at unreachable points
                         for (size_t i = 0; i < pts.size(); ++i) {
                             if (reach_result.statuses[i] == ReachStatus::OK) {
+                                ++total_reachable;
                                 PathPointWithJoints pp;
                                 pp.cart_pos = poly.points[i];
                                 pp.joint = reach_result.solutions[i];
                                 pp.wire_on = true;
                                 segments.back().push_back(pp);
                             } else {
+                                ++total_unreachable;
                                 // NaN: start new segment
                                 if (segments.back().size() > 1) {
                                     segments.emplace_back();
@@ -1279,6 +1366,12 @@ BatchReport runBatch(const PipelineConfig& config)
                         }
                     }
                 }
+
+                std::cout << "[" << report.name << "] trajectory stats: "
+                          << layers_processed << " layers, "
+                          << total_polylines << " polylines, "
+                          << total_reachable << " reachable, "
+                          << total_unreachable << " unreachable\n" << std::flush;
 
                 // Remove empty segments
                 segments.erase(

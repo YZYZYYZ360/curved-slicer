@@ -410,6 +410,8 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDoubleArray3(reachability, "workpiece_up", workpiece_up);
     config.kuka.reachability.workpiece_up = {workpiece_up[0], workpiece_up[1], workpiece_up[2]};
     readDouble(reachability, "min_dot_threshold", config.kuka.reachability.min_dot_threshold);
+    readDouble(reachability, "workspace_r_min_mm", config.kuka.reachability.workspace_r_min_mm);
+    readDouble(reachability, "workspace_r_max_mm", config.kuka.reachability.workspace_r_max_mm);
 
     const toml::table* kuka_home = tableAt(root, {"kuka", "home"});
     if (kuka_home) {

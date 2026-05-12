@@ -10,7 +10,7 @@ name     = "mao_rescaled"
 stl_path = "../tests/models/毛主席头雕(42_52_70)_1_Rescaled(0.7).stl"
 
 [voxel]
-spacing_mm   = 0.5
+spacing_mm   = 1.0
 padding_mm   = 0.0
 sdf_band_mm  = 1.0
 
@@ -109,6 +109,7 @@ robot_ini_abc = [0.0, 0.0, 0.0]
 [kuka.reachability]
 workpiece_up      = [0.0, 0.0, 1.0]
 min_dot_threshold = 0.05
+workspace_r_min_mm = 10.0
 
 [kuka.world_to_base]
 world_to_base = [
