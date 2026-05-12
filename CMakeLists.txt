@@ -45,6 +45,24 @@ if(NOT TARGET Eigen3::Eigen)
     target_include_directories(Eigen3::Eigen INTERFACE ${eigen_SOURCE_DIR})
 endif()
 
+FetchContent_Declare(libigl
+    GIT_REPOSITORY https://github.com/libigl/libigl.git
+    GIT_TAG v2.5.0
+    GIT_CONFIG http.sslBackend=openssl
+    GIT_SUBMODULES ""
+    GIT_PROGRESS TRUE
+)
+
+set(LIBIGL_EMBREE OFF CACHE BOOL "" FORCE)
+set(LIBIGL_GLFW OFF CACHE BOOL "" FORCE)
+set(LIBIGL_OPENGL OFF CACHE BOOL "" FORCE)
+set(LIBIGL_PNG OFF CACHE BOOL "" FORCE)
+set(LIBIGL_STB OFF CACHE BOOL "" FORCE)
+set(LIBIGL_PREDICATES OFF CACHE BOOL "" FORCE)
+set(LIBIGL_XML OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(libigl)
+
 set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 
 add_library(curved_slicer_phase0
@@ -75,7 +93,9 @@ target_include_directories(curved_slicer_phase0
 target_link_libraries(curved_slicer_phase0
     PRIVATE
         tomlplusplus::tomlplusplus
+    PUBLIC
         Eigen3::Eigen
+        igl::core
 )
 
 if(WIN32)
@@ -244,3 +264,11 @@ configure_phase0_test(path_filter_unit_test)
 target_link_libraries(path_filter_unit_test PRIVATE Eigen3::Eigen)
 
 add_test(NAME path_filter_unit COMMAND path_filter_unit_test)
+
+add_executable(igl_smoke_test
+    tests/igl_smoke_test.cpp
+)
+
+configure_phase0_test(igl_smoke_test)
+
+add_test(NAME igl_smoke COMMAND igl_smoke_test)
