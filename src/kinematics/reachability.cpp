@@ -119,4 +119,36 @@ std::vector<VoxelIndex> filterReachableVoxels(
     return reachable;
 }
 
+PathReachabilityResult filterReachablePathPoints(
+    const std::vector<Vec3>& points,
+    const std::vector<Vec3>& tangents,
+    const Vec3& G_direction,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params)
+{
+    PathReachabilityResult result;
+    int n = static_cast<int>(points.size());
+    result.statuses.resize(n);
+    result.solutions.resize(n);
+
+    Eigen::Vector3d G(G_direction.x, G_direction.y, G_direction.z);
+    JointConfig ref{};
+
+    for (int i = 0; i < n; ++i) {
+        Eigen::Vector3d t(tangents[i].x, tangents[i].y, tangents[i].z);
+        Eigen::Matrix3d R_tool = constructToolFrame(t, G);
+        CartPose pose = toolFrameToCartPose(
+            Eigen::Vector3d(points[i].x, points[i].y, points[i].z), R_tool);
+
+        auto r = checkReachability(pose, ref, dh, params);
+        result.statuses[i] = r.status;
+        if (r.status == ReachStatus::OK) {
+            result.solutions[i] = r.solution;
+            ref = r.solution;
+            ++result.num_reachable;
+        }
+    }
+    return result;
+}
+
 }  // namespace cslc

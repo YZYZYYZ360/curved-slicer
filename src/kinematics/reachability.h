@@ -45,6 +45,13 @@ ReachabilityResult checkReachability(
     const KR4DHParams& dh,
     const ReachabilityParams& params = {});
 
+// Per-path-point reachability result.
+struct PathReachabilityResult {
+    std::vector<ReachStatus>  statuses;
+    std::vector<JointConfig>  solutions;
+    int                       num_reachable = 0;
+};
+
 // Filter occupied voxels by reachability.
 // G_direction is the outward surface normal used to orient the tool (tool_z = -G).
 // Returns indices of reachable voxels.
@@ -54,5 +61,14 @@ std::vector<VoxelIndex> filterReachableVoxels(
     const KR4DHParams& dh,
     const ReachabilityParams& params = {},
     const JointConfig& reference = JointConfig{});
+
+// Filter a sequence of path points by reachability with reference chaining.
+// Each point's IK solution becomes the reference for the next point.
+PathReachabilityResult filterReachablePathPoints(
+    const std::vector<Vec3>& points,
+    const std::vector<Vec3>& tangents,
+    const Vec3& G_direction,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params = {});
 
 }  // namespace cslc
