@@ -80,6 +80,7 @@ add_library(curved_slicer_phase0
     src/kinematics/ik_solver.cpp
     src/kinematics/reachability.cpp
     src/path/pose_from_path.cpp
+    src/path/geodesic_paths.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -272,3 +273,13 @@ add_executable(igl_smoke_test
 configure_phase0_test(igl_smoke_test)
 
 add_test(NAME igl_smoke COMMAND igl_smoke_test)
+
+add_executable(geodesic_paths_unit_test
+    tests/geodesic_paths_unit_test.cpp
+)
+
+configure_phase0_test(geodesic_paths_unit_test)
+
+target_link_libraries(geodesic_paths_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME geodesic_paths_unit COMMAND geodesic_paths_unit_test)
