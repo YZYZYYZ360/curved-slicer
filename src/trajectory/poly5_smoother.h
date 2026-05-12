@@ -61,4 +61,9 @@ double computeSegmentDuration(const PathPointWithJoints& a,
                               const PathPointWithJoints& b,
                               const TrajectoryParams& params);
 
+// Main function: smooth a path of joint configurations into a 4ms-sampled trajectory.
+std::vector<TrajectoryPoint> smoothTrajectoryPoly5(
+    const std::vector<PathPointWithJoints>& path,
+    const TrajectoryParams& params);
+
 }  // namespace cslc
