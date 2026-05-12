@@ -134,12 +134,47 @@ void test_smooth_trajectory()
               << traj.size() << " points)\n";
 }
 
+void test_delta_cap_validation()
+{
+    using namespace cslc;
+
+    std::vector<PathPointWithJoints> path(2);
+    path[0].cart_pos = Eigen::Vector3d(0, 0, 500);
+    path[0].joint.q_deg = {0, 0, 0, 0, 0, 0};
+    path[0].wire_on = true;
+
+    path[1].cart_pos = Eigen::Vector3d(0.001, 0, 500);
+    path[1].joint.q_deg = {90, 0, 0, 0, 0, 0};
+    path[1].wire_on = true;
+
+    TrajectoryParams params;
+    params.sample_period_ms = 4.0;
+    params.max_joint_velocity_deg_per_s = 200.0;
+    params.max_joint_delta_per_cycle_deg = 1.0;
+
+    // T = max(0.001/5, 90/200) = 0.45s
+    // poly5 peak velocity: v_max = (15/8)*(90/0.45) = 375°/s
+    // Per-cycle delta at peak: 375 * 0.004 = 1.5° > 1.0° limit
+
+    bool threw = false;
+    try {
+        auto traj = smoothTrajectoryPoly5(path, params);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        std::cout << "  delta_cap threw: " << e.what() << "\n";
+    }
+    require(threw, "delta cap validation throws on violation");
+
+    std::cout << "  test_delta_cap_validation PASSED\n";
+}
+
 int main()
 {
     try {
         test_poly5_boundary();
         test_dual_time_constraint();
         test_smooth_trajectory();
+        test_delta_cap_validation();
         std::cout << "poly5_smoother_unit_test PASSED\n";
         return 0;
     } catch (const std::exception& e) {

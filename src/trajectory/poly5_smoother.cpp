@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace cslc {
 
@@ -91,6 +92,20 @@ std::vector<TrajectoryPoint> smoothTrajectoryPoly5(
         }
 
         timestamp_ms = out.back().timestamp_ms + sample_dt_ms;
+    }
+
+    // Validate per-cycle joint delta
+    for (size_t i = 1; i < out.size(); ++i) {
+        for (int j = 0; j < 6; ++j) {
+            double delta = std::abs(out[i].joint_deg[j] - out[i - 1].joint_deg[j]);
+            if (delta > params.max_joint_delta_per_cycle_deg) {
+                throw std::runtime_error(
+                    "poly5 smoother: per-cycle joint delta exceeded limit at point "
+                    + std::to_string(i) + " joint " + std::to_string(j)
+                    + ": delta=" + std::to_string(delta) + " deg, limit="
+                    + std::to_string(params.max_joint_delta_per_cycle_deg) + " deg");
+            }
+        }
     }
 
     return out;
