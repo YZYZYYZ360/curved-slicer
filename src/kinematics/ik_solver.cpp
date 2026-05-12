@@ -266,8 +266,10 @@ std::vector<IKSolution> solveIKAll(
             double j4, j5, j6;
             if (!decompose_j456(R_456, wf == 1, j4, j5, j6)) continue;
 
-            // Normalize θ₂,θ₃ to [-π,π] before limit check.
-            // α₂=π DH convention can push θ₃ outside [-π,π] via θ₂-θ₃ coupling.
+            // θ₂/θ₃ normalize 仅在 joint_limits 检查前进行（让 ±2π 等价表示
+            // 落入 qlim 范围内）；R03 计算可用 raw θ 也可用 normalized θ，
+            // cos/sin 是 2π-周期，二者数值等价。当前用 raw 是历史路径，
+            // Plan 2 IK refactor 时统一。
             double q_rad[6] = {j1, normalize_angle(theta2), normalize_angle(theta3),
                                j4, j5, j6};
             if (!joints_in_limits(q_rad, dh.qlim_deg)) continue;

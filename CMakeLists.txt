@@ -94,9 +94,9 @@ target_include_directories(curved_slicer_phase0
 target_link_libraries(curved_slicer_phase0
     PRIVATE
         tomlplusplus::tomlplusplus
+        igl::core
     PUBLIC
         Eigen3::Eigen
-        igl::core
 )
 
 if(WIN32)
@@ -272,6 +272,8 @@ add_executable(igl_smoke_test
 
 configure_phase0_test(igl_smoke_test)
 
+target_link_libraries(igl_smoke_test PRIVATE igl::core)
+
 add_test(NAME igl_smoke COMMAND igl_smoke_test)
 
 add_executable(geodesic_paths_unit_test
@@ -280,6 +282,6 @@ add_executable(geodesic_paths_unit_test
 
 configure_phase0_test(geodesic_paths_unit_test)
 
-target_link_libraries(geodesic_paths_unit_test PRIVATE Eigen3::Eigen)
+target_link_libraries(geodesic_paths_unit_test PRIVATE Eigen3::Eigen igl::core)
 
 add_test(NAME geodesic_paths_unit COMMAND geodesic_paths_unit_test)
