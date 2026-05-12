@@ -224,3 +224,13 @@ configure_phase0_test(reachability_unit_test)
 target_link_libraries(reachability_unit_test PRIVATE Eigen3::Eigen)
 
 add_test(NAME reachability_unit COMMAND reachability_unit_test)
+
+add_executable(voxel_filter_unit_test
+    tests/voxel_filter_unit_test.cpp
+)
+
+configure_phase0_test(voxel_filter_unit_test)
+
+target_link_libraries(voxel_filter_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME voxel_filter_unit COMMAND voxel_filter_unit_test)

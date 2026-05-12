@@ -1,7 +1,9 @@
 #include "kinematics/reachability.h"
 #include "kinematics/ik_solver.h"
+#include "path/pose_from_path.h"
 
 #include <cmath>
+#include <Eigen/Dense>
 
 namespace cslc {
 
@@ -90,6 +92,31 @@ ReachabilityResult checkReachability(
 
     result.status = ReachStatus::OK;
     return result;
+}
+
+std::vector<VoxelIndex> filterReachableVoxels(
+    const VoxelGrid& grid,
+    const Vec3& G_direction,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params,
+    const JointConfig& reference)
+{
+    Eigen::Vector3d G(G_direction.x, G_direction.y, G_direction.z);
+    Eigen::Matrix3d R_tool = constructToolFrame(Eigen::Vector3d(1, 0, 0), G);
+
+    auto occupied = grid.occupiedVoxels();
+    std::vector<VoxelIndex> reachable;
+    reachable.reserve(occupied.size());
+
+    for (const auto& vi : occupied) {
+        Vec3 c = grid.center(vi.x, vi.y, vi.z);
+        CartPose pose = toolFrameToCartPose(Eigen::Vector3d(c.x, c.y, c.z), R_tool);
+        auto r = checkReachability(pose, reference, dh, params);
+        if (r.status == ReachStatus::OK) {
+            reachable.push_back(vi);
+        }
+    }
+    return reachable;
 }
 
 }  // namespace cslc

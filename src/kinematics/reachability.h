@@ -2,8 +2,11 @@
 
 #include "kinematics/cart_pose.h"
 #include "kinematics/dh_params.h"
+#include "geometry/voxel_grid.h"
+#include "field/laplacian.h"
 
 #include <array>
+#include <vector>
 
 namespace cslc {
 
@@ -41,5 +44,15 @@ ReachabilityResult checkReachability(
     const JointConfig& reference,
     const KR4DHParams& dh,
     const ReachabilityParams& params = {});
+
+// Filter occupied voxels by reachability.
+// G_direction is the outward surface normal used to orient the tool (tool_z = -G).
+// Returns indices of reachable voxels.
+std::vector<VoxelIndex> filterReachableVoxels(
+    const VoxelGrid& grid,
+    const Vec3& G_direction,
+    const KR4DHParams& dh,
+    const ReachabilityParams& params = {},
+    const JointConfig& reference = JointConfig{});
 
 }  // namespace cslc
