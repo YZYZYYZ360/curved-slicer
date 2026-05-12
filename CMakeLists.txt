@@ -82,6 +82,7 @@ add_library(curved_slicer_phase0
     src/path/pose_from_path.cpp
     src/path/geodesic_paths.cpp
     src/path/path_postprocessing.cpp
+    src/trajectory/poly5_smoother.cpp
     src/metrics/curvature.cpp
     src/surface/iso_surface.cpp
     src/app/pipeline.cpp
@@ -296,3 +297,13 @@ configure_phase0_test(path_postprocessing_unit_test)
 target_link_libraries(path_postprocessing_unit_test PRIVATE Eigen3::Eigen)
 
 add_test(NAME path_postprocessing_unit COMMAND path_postprocessing_unit_test)
+
+add_executable(poly5_smoother_unit_test
+    tests/poly5_smoother_unit_test.cpp
+)
+
+configure_phase0_test(poly5_smoother_unit_test)
+
+target_link_libraries(poly5_smoother_unit_test PRIVATE Eigen3::Eigen)
+
+add_test(NAME poly5_smoother_unit COMMAND poly5_smoother_unit_test)
