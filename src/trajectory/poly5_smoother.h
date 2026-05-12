@@ -56,4 +56,9 @@ struct Poly5Coeffs {
 // q(0)=q0, q(T)=qT, q'(0)=q'(T)=0, q''(0)=q''(T)=0.
 Poly5Coeffs computePoly5(double q0, double qT, double T);
 
+// Compute segment duration from dual time constraint.
+double computeSegmentDuration(const PathPointWithJoints& a,
+                              const PathPointWithJoints& b,
+                              const TrajectoryParams& params);
+
 }  // namespace cslc

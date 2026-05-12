@@ -1,5 +1,8 @@
 #include "trajectory/poly5_smoother.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace cslc {
 
 Poly5Coeffs computePoly5(double q0, double qT, double T)
@@ -16,6 +19,22 @@ Poly5Coeffs computePoly5(double q0, double qT, double T)
     c.c4 = -15.0 * D / T4;
     c.c5 = 6.0 * D / T5;
     return c;
+}
+
+double computeSegmentDuration(const PathPointWithJoints& a,
+                              const PathPointWithJoints& b,
+                              const TrajectoryParams& params)
+{
+    double d_cart = (b.cart_pos - a.cart_pos).norm();
+    double dt_cart = d_cart / params.target_line_speed_mm_per_s;
+
+    double max_dq = 0;
+    for (int i = 0; i < 6; ++i) {
+        max_dq = std::max(max_dq, std::abs(b.joint.q_deg[i] - a.joint.q_deg[i]));
+    }
+    double dt_joint = max_dq / params.max_joint_velocity_deg_per_s;
+
+    return std::max(dt_cart, dt_joint);
 }
 
 }  // namespace cslc
