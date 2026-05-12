@@ -68,12 +68,22 @@ static std::vector<PathPolyline> stitchEdgesToPolylines(
         adj[b].push_back({a, static_cast<int>(e)});
     }
 
-    // Walk edges to build polylines
+    // Walk edges to build polylines.
+    // Start from degree-1 vertices (dead ends) first so chains are walked
+    // endpoint-to-endpoint rather than from a pass-through vertex.
+    std::vector<int> walk_order;
+    for (auto& [v, neighbors] : adj) {
+        if (neighbors.size() == 1) walk_order.push_back(v);
+    }
+    for (auto& [v, neighbors] : adj) {
+        if (neighbors.size() > 1) walk_order.push_back(v);
+    }
+
     std::set<int> used_edges;
     std::vector<PathPolyline> result;
 
-    for (auto& [vstart, neighbors] : adj) {
-        for (auto& [first_nb, first_ei] : neighbors) {
+    for (int vstart : walk_order) {
+        for (auto& [first_nb, first_ei] : adj[vstart]) {
             if (used_edges.count(first_ei)) continue;
 
             std::vector<int> path_verts = {vstart, first_nb};
