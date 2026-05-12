@@ -204,6 +204,74 @@ static void computeTangents(PathPolyline& poly)
     }
 }
 
+// Resample a polyline to uniform step length via cumulative arc-length
+// interpolation.  For closed polylines the last segment wraps to the first.
+static PathPolyline resamplePolyline(const PathPolyline& src, double step_mm)
+{
+    PathPolyline out;
+    out.is_closed = src.is_closed;
+
+    const int n = static_cast<int>(src.points.size());
+    if (n < 2 || step_mm <= 0.0) return src;
+
+    // Compute cumulative arc lengths
+    std::vector<double> cum(n, 0.0);
+    for (int i = 1; i < n; ++i) {
+        cum[i] = cum[i - 1] + (src.points[i] - src.points[i - 1]).norm();
+    }
+    double total = cum.back();
+    if (src.is_closed) {
+        total += (src.points[0] - src.points.back()).norm();
+    }
+
+    if (total < step_mm) return src;
+
+    // For closed polylines, use adaptive step so all segments are equal.
+    // For open polylines, use exact step_mm.
+    int num_segments;
+    double actual_step;
+    if (src.is_closed) {
+        num_segments = std::max(1, static_cast<int>(std::round(total / step_mm)));
+        actual_step = total / num_segments;
+    } else {
+        num_segments = static_cast<int>(total / step_mm);
+        actual_step = step_mm;
+    }
+
+    // Generate resampled points using binary search for segment lookup
+    int num_points = src.is_closed ? num_segments : num_segments + 1;
+    for (int s = 0; s < num_points; ++s) {
+        double d = s * actual_step;
+
+        if (src.is_closed && d >= cum.back()) {
+            // Wrap-around segment (last vertex → first vertex)
+            double wrap_len = total - cum.back();
+            double t = (wrap_len > 1e-12) ? (d - cum.back()) / wrap_len : 0.0;
+            out.points.push_back(src.points.back() + t * (src.points[0] - src.points.back()));
+        } else {
+            // Binary search for segment
+            auto it = std::upper_bound(cum.begin(), cum.end(), d);
+            int seg = static_cast<int>(it - cum.begin()) - 1;
+            if (seg < 0) seg = 0;
+            if (seg >= n - 1) seg = n - 2;
+            double seg_len = cum[seg + 1] - cum[seg];
+            double t = (seg_len > 1e-12) ? (d - cum[seg]) / seg_len : 0.0;
+            out.points.push_back(src.points[seg] + t * (src.points[seg + 1] - src.points[seg]));
+        }
+    }
+
+    // Compute total length
+    out.total_length_mm = 0.0;
+    for (size_t i = 1; i < out.points.size(); ++i) {
+        out.total_length_mm += (out.points[i] - out.points[i - 1]).norm();
+    }
+    if (out.is_closed && out.points.size() > 1) {
+        out.total_length_mm += (out.points.back() - out.points.front()).norm();
+    }
+
+    return out;
+}
+
 std::vector<PathPolyline> generateGeodesicPaths(
     const Eigen::MatrixXd& V,
     const Eigen::MatrixXi& F,
@@ -250,14 +318,15 @@ std::vector<PathPolyline> generateGeodesicPaths(
         edge_groups[I(e)].push_back({iE(e, 0), iE(e, 1)});
     }
 
-    // 6. Stitch each iso-value's edges, then normalize and compute tangents
+    // 6. Stitch, normalize, resample, and compute tangents
     for (auto& group : edge_groups) {
         auto stitched = stitchEdgesToPolylines(iV, group);
         for (auto& poly : stitched) {
             normalizeStartPoint(poly);
-            computeTangents(poly);
+            auto resampled = resamplePolyline(poly, params.resample_step_mm);
+            computeTangents(resampled);
+            paths.push_back(std::move(resampled));
         }
-        paths.insert(paths.end(), stitched.begin(), stitched.end());
     }
 
     return paths;

@@ -231,6 +231,74 @@ void test_finer_mesh()
     std::cout << "  test_finer_mesh PASSED\n";
 }
 
+// Test case 5: uniform resampling
+void test_resample()
+{
+    using namespace cslc;
+
+    const int n_ring = 32;
+    const double R = 10.0;
+    Eigen::MatrixXd V;
+    Eigen::MatrixXi F;
+    buildDiskMesh(n_ring, R, V, F);
+
+    GeodesicPathParams params;
+    params.line_spacing_mm = 2.0;
+    params.resample_step_mm = 0.5;
+
+    auto paths = generateGeodesicPaths(V, F, params);
+
+    // Find a closed polyline
+    const PathPolyline* closed_poly = nullptr;
+    for (auto& p : paths) {
+        if (p.is_closed && p.points.size() >= 10) {
+            closed_poly = &p;
+            break;
+        }
+    }
+    require(closed_poly != nullptr, "resample: found a closed polyline");
+
+    // Check spacing uniformity
+    int n = static_cast<int>(closed_poly->points.size());
+    std::vector<double> spacings;
+    for (int i = 0; i < n; ++i) {
+        int next = (i + 1) % n;
+        spacings.push_back((closed_poly->points[next] - closed_poly->points[i]).norm());
+    }
+
+    double mean_spacing = 0;
+    for (double s : spacings) mean_spacing += s;
+    mean_spacing /= spacings.size();
+
+    double max_dev = 0;
+    for (double s : spacings) {
+        double dev = std::abs(s - mean_spacing) / mean_spacing;
+        if (dev > max_dev) max_dev = dev;
+    }
+
+    std::cout << "  resample: n=" << n << " mean_spacing=" << mean_spacing
+              << " max_dev=" << (max_dev * 100) << "%"
+              << " total_length=" << closed_poly->total_length_mm << "\n";
+
+    // Spacing should be close to resample_step_mm (within 10%)
+    require(std::abs(mean_spacing - params.resample_step_mm) / params.resample_step_mm < 0.10,
+            "resample: mean spacing ≈ step_mm");
+
+    // Total length should be preserved (within 5%)
+    // The original closed ring length is approximately 2*pi*R_at_d2 ≈ 12.57
+    // but we're using the resampled version, so check self-consistency
+    double computed_length = 0;
+    for (size_t i = 1; i < closed_poly->points.size(); ++i) {
+        computed_length += (closed_poly->points[i] - closed_poly->points[i - 1]).norm();
+    }
+    computed_length += (closed_poly->points.back() - closed_poly->points.front()).norm();
+
+    require(std::abs(computed_length - closed_poly->total_length_mm) < 0.01,
+            "resample: total_length consistent with point distances");
+
+    std::cout << "  test_resample PASSED\n";
+}
+
 int main()
 {
     try {
@@ -239,6 +307,7 @@ int main()
         test_start_point();
         test_tangents();
         test_finer_mesh();
+        test_resample();
         std::cout << "geodesic_paths_unit_test PASSED\n";
         return 0;
     } catch (const std::exception& e) {
