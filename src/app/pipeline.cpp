@@ -993,7 +993,48 @@ BatchReport runBatch(const PipelineConfig& config)
 
         try {
             const auto read_start = Clock::now();
-            const TriangleMesh mesh = readStl(model.stl_path);
+            TriangleMesh mesh = readStl(model.stl_path);
+
+            // Apply world_to_base transformation if not identity
+            {
+                bool is_identity = true;
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 4; ++c) {
+                        double expected = (r == c) ? 1.0 : 0.0;
+                        if (std::abs(config.kuka.world_to_base[r][c] - expected) > 1e-9)
+                            is_identity = false;
+                    }
+                if (!is_identity) {
+                    Eigen::Matrix4d T;
+                    for (int r = 0; r < 4; ++r)
+                        for (int c = 0; c < 4; ++c)
+                            T(r, c) = config.kuka.world_to_base[r][c];
+                    Eigen::Matrix3d R = T.block<3,3>(0,0);
+                    for (auto& tri : mesh.triangles) {
+                        for (auto& v : tri.vertices) {
+                            Eigen::Vector4d p(v.x, v.y, v.z, 1.0);
+                            Eigen::Vector4d tp = T * p;
+                            v = {tp(0), tp(1), tp(2)};
+                        }
+                        Eigen::Vector3d rn = R * Eigen::Vector3d(tri.normal.x, tri.normal.y, tri.normal.z);
+                        tri.normal = {rn.x(), rn.y(), rn.z()};
+                    }
+                    // Recompute bbox
+                    mesh.bbox.min = {1e30, 1e30, 1e30};
+                    mesh.bbox.max = {-1e30, -1e30, -1e30};
+                    for (const auto& tri : mesh.triangles) {
+                        for (const auto& v : tri.vertices) {
+                            mesh.bbox.min.x = std::min(mesh.bbox.min.x, v.x);
+                            mesh.bbox.min.y = std::min(mesh.bbox.min.y, v.y);
+                            mesh.bbox.min.z = std::min(mesh.bbox.min.z, v.z);
+                            mesh.bbox.max.x = std::max(mesh.bbox.max.x, v.x);
+                            mesh.bbox.max.y = std::max(mesh.bbox.max.y, v.y);
+                            mesh.bbox.max.z = std::max(mesh.bbox.max.z, v.z);
+                        }
+                    }
+                }
+            }
+
             const auto read_end = Clock::now();
 
             const auto voxel_start = Clock::now();
@@ -1101,6 +1142,7 @@ BatchReport runBatch(const PipelineConfig& config)
             } else if (report.pipeline == "vector_kuka_v4") {
                 // v4 pipeline: same field computation as vector_kuka, then
                 // geodesic paths → IK → trajectory smoothing → CSV output
+
                 const auto laplacian_start = Clock::now();
                 const LaplacianVectorBC bc = generateVectorBC(grid, sdf, config.field_boundary);
                 LaplacianParams laplacian_params = config.algorithm.field.laplacian;
@@ -1138,8 +1180,29 @@ BatchReport runBatch(const PipelineConfig& config)
                 }
                 poisson_params.log_iterations = true;
                 poisson_params.progress_label = report.name;
+
+
                 phi = solvePoisson(grid, *poisson_input, poisson_params);
+
+                // Normalize phi to [0, 1] for iso-surface extraction
+                // The Poisson solver may produce values outside [0,1] due to
+                // strong divergence in the vector field.
+                double phi_min = 1e30, phi_max_v = -1e30;
+                for (double v : phi.values) {
+                    if (!std::isfinite(v)) continue;
+                    phi_min = std::min(phi_min, v);
+                    phi_max_v = std::max(phi_max_v, v);
+                }
+                double phi_range = phi_max_v - phi_min;
+                if (phi_range > 1e-12) {
+                    for (double& v : phi.values) {
+                        if (std::isfinite(v)) {
+                            v = (v - phi_min) / phi_range;
+                        }
+                    }
+                }
                 has_gauge_diagnostics = false;
+
                 const auto poisson_end = Clock::now();
                 poisson_ms = elapsedMs(poisson_start, poisson_end);
                 phi_is_normalized = false;
@@ -1148,11 +1211,7 @@ BatchReport runBatch(const PipelineConfig& config)
                 throw std::runtime_error("algorithm.pipeline must be scalar, vector_kuka, or vector_kuka_v4");
             }
 
-            // Skip strict phi validation for v4 (geometric_z + dual-anchor
-            // can produce values outside [0,1] range)
-            if (report.pipeline != "vector_kuka_v4") {
-                validatePhi(phi);
-            }
+            validatePhi(phi);
             const auto phi_range = finiteRange(phi);
 
             const std::filesystem::path model_dir = config.io.output_root / model.name;
