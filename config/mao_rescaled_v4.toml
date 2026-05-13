@@ -109,13 +109,13 @@ robot_ini_abc = [0.0, 0.0, 0.0]
 [kuka.reachability]
 workpiece_up      = [0.0, 0.0, 1.0]
 min_dot_threshold = 0.05
-workspace_r_min_mm = 10.0
 
 [kuka.world_to_base]
+# Translate model from origin (~27mm from base) to 400mm in front of robot
 world_to_base = [
   [1.0, 0.0, 0.0, 0.0],
-  [0.0, 1.0, 0.0, 0.0],
-  [0.0, 0.0, 1.0, 0.0],
+  [0.0, 1.0, 0.0, 421.0],
+  [0.0, 0.0, 1.0, 182.0],
   [0.0, 0.0, 0.0, 1.0],
 ]
 
