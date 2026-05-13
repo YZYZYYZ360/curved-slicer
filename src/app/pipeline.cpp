@@ -1203,6 +1203,16 @@ BatchReport runBatch(const PipelineConfig& config)
                 }
                 has_gauge_diagnostics = false;
 
+                // Dump intermediate fields for v4
+                if (config.io.debug_dump_intermediates) {
+                    const std::filesystem::path dump_dir = config.io.output_root / model.name;
+                    std::filesystem::create_directories(dump_dir);
+                    writeVoxelOccupiedPly(grid, dump_dir / "voxel_occupied.ply");
+                    writeSdfPointsPly(grid, sdf, dump_dir / "sdf_points.ply");
+                    writeBcVoxelsPly(grid, bc, print_dir, dump_dir / "bc_voxels.ply");
+                    writeGFieldPly(grid, clamped, dump_dir / "g_field.ply");
+                }
+
                 const auto poisson_end = Clock::now();
                 poisson_ms = elapsedMs(poisson_start, poisson_end);
                 phi_is_normalized = false;
@@ -1323,6 +1333,37 @@ BatchReport runBatch(const PipelineConfig& config)
                         continue;
                     }
                     total_polylines += static_cast<int>(geodesic_paths.size());
+
+                    // Dump geodesic paths as PLY line set
+                    if (config.io.debug_dump_intermediates && !geodesic_paths.empty()) {
+                        std::ostringstream ply_name;
+                        ply_name << "geodesic_" << std::setfill('0') << std::setw(3) << iso_mesh.layer_id << ".ply";
+                        std::ofstream ply(model_dir / ply_name.str());
+                        int total_verts = 0, total_edges = 0;
+                        for (auto& p : geodesic_paths) {
+                            total_verts += static_cast<int>(p.points.size());
+                            total_edges += static_cast<int>(p.points.size()) - 1;
+                            if (p.is_closed) total_edges += 1;
+                        }
+                        ply << "ply\nformat ascii 1.0\nelement vertex " << total_verts
+                            << "\nproperty float x\nproperty float y\nproperty float z"
+                            << "\nelement edge " << total_edges
+                            << "\nproperty int vertex1\nproperty int vertex2\nend_header\n";
+                        int v_offset = 0;
+                        for (auto& p : geodesic_paths) {
+                            for (auto& pt : p.points) {
+                                ply << pt.x() << " " << pt.y() << " " << pt.z() << "\n";
+                            }
+                            for (size_t ei = 1; ei < p.points.size(); ++ei) {
+                                ply << (v_offset + ei - 1) << " " << (v_offset + ei) << "\n";
+                            }
+                            if (p.is_closed && p.points.size() > 2) {
+                                ply << (v_offset + p.points.size() - 1) << " " << v_offset << "\n";
+                            }
+                            v_offset += static_cast<int>(p.points.size());
+                        }
+                        ply.close();
+                    }
 
                     // Precompute per-vertex normals from triangle faces
                     std::vector<Eigen::Vector3d> vertex_normals(nv, Eigen::Vector3d::Zero());
@@ -1459,6 +1500,27 @@ BatchReport runBatch(const PipelineConfig& config)
                     }
                 }
                 csv.close();
+
+                // Dump reachable path points as PLY point cloud
+                if (config.io.debug_dump_intermediates) {
+                    int total_pts = 0;
+                    for (auto& seg : segments) total_pts += static_cast<int>(seg.size());
+                    if (total_pts > 0) {
+                        std::ofstream ply(model_dir / "trajectory_points.ply");
+                        ply << "ply\nformat ascii 1.0\nelement vertex " << total_pts
+                            << "\nproperty float x\nproperty float y\nproperty float z"
+                            << "\nproperty int segment_id\nend_header\n";
+                        int seg_id = 0;
+                        for (auto& seg : segments) {
+                            ++seg_id;
+                            for (auto& pp : seg) {
+                                ply << pp.cart_pos.x() << " " << pp.cart_pos.y()
+                                    << " " << pp.cart_pos.z() << " " << seg_id << "\n";
+                            }
+                        }
+                        ply.close();
+                    }
+                }
 
                 const auto traj_end = Clock::now();
                 std::cout << "[" << report.name << "] trajectory done: "
