@@ -1,0 +1,247 @@
+## 根本问题先说清楚
+
+这个算法的核心 conceptual flaw 是：**Phase B 证明的只是离散 voxel 标签 `L(v)` 在构造时局部满足若干检查；但最终论文要打印的是 Phase C/D 之后的连续等值面和连续机器人轨迹。你没有证明从 `L(v)` 到 `φ_smooth` 再到 marching-cubes mesh 再到 6 轴轨迹的约束保持。**
+因此，“C1~C4 构造保证 + PDE 平滑保持拓扑 + 二次验证兜底”这条叙事目前不成立。尤其是你文本中明确声称 `λ` 正则项保证 `φ_smooth` 与 `L(v)` 拓扑等价，且 Phase B 构造保证 C1~C4；这个 claim 在数学上是错误的。
+
+另一个根本问题是：你把一个**全局排序 / 可达性 / 碰撞规划问题**写成了局部贪心波前。Wang 2018 已经把多轴 AM 形式化为“可达、无碰撞、自支撑”的曲面层序列，并指出连续体积空间里的全局搜索不现实，转而做 voxel accumulation field 和 shadow/inverse peeling 启发式([Charlie C.L. Wang's Page][1])。你的 Phase B 本质上仍是同一类启发式，只是把更多 predicate 塞进候选过滤；这不足以支撑“正确性”或“首次全前置”的强 claim。
+
+---
+
+# 1. 理论严谨性
+
+**判定：你的论点部分成立，但关键正确性 claim 不成立。**
+
+## 具体批评
+
+C1 的形式化定义是错的。你写的是
+`ASN(v) = {v_rst : ||(i,j,k)-(r,s,t)||_1 ∈ {1,2}}`，然后解释为“18 个邻居：6 面 + 12 棱，不含 8 顶点”。这不等价。`L1 distance = 2` 还包括 `(±2,0,0),(0,±2,0),(0,0,±2)` 这 6 个轴向二阶邻居，所以总数是 24，不是 18。若你要 18 邻域，应写成：
+`ASN18(v) = {u : ||u-v||∞ = 1 且 ||u-v||1 ≤ 2}`。
+这个错误不是排版问题，而是会改变 C1 的物理含义：轴向隔一个 voxel 的“支撑”可能没有材料接触。
+
+C1 也不是物理 support-free 的充分条件。`∃ ASN(v) ∩ processed ≠ ∅` 只说明 voxel 图上有邻接，不说明熔融丝材有足够接触面积、法向压实、桥接长度、冷却稳定性、重力方向和喷嘴压力条件。Dumas 2014 的 scaffold 论文明确从 FFF 的物理事实出发：材料只能沉积在已有表面上，overhang 需要支撑；他们还把稳定性和桥接能力作为支撑结构设计目标([jdumas.org][2])。你的 C1 是 Wang 类 voxel adjacency 的制造序列近似，不应被写成“根本约束”的完整物理定义。
+
+C2 是“单点 pose 可达”，不是“轨迹可执行”。你只要求每个 voxel 存在一个 IK 解、关节限位满足、远离几个奇异条件。这没有保证相邻点使用同一 IK branch，没有保证关节速度、加速度、jerk、RSI 4 ms 插补可跟踪，也没有保证机器人 link、夹具、基座、线缆和工件的全体碰撞安全。`∃ q` 是太弱的条件；真实可制造性需要连续路径上的 `q(s)`，且满足 `q ∈ qlim, |q'|, |q''|, |q'''|` 以及 self-collision / environment collision。
+
+C3 是静态 nozzle cylinder 对 `processed` 的碰撞检查，但真正需要的是**连续扫掠体 collision**。你后面在 Phase E 生成曲面上的 polyline 和 4 ms 关键帧，而 Phase B 只在 voxel center 上查一次圆柱体。两者不等价。还缺少 intra-layer collision：你选择 `L_next` 后一次性 `processed |= L_next`，但实际打印 `L_next` 内部有先后顺序，后打印点会遇到同层先打印材料。你没有在 Phase B 中证明同层路径存在。
+
+C4 用平均曲率 `|H| ≤ 1/r_n` 是不合格的。首先，平均曲率不能控制局部可达性。鞍面上 `k1 = -k2` 时 `H = 0`，但两个主曲率绝对值都可能很大，喷头或路径仍可能无法通过。其次，喷头半径 `r_n≈10 mm` 是 nozzle body clearance，不是熔融丝材或曲面层几何曲率的自然上界。第三，你的 H 来自 STL 的 SDF Hessian，但最终打印的层是 `φ_smooth` 的等值面；你检查的是一个场的曲率，却打印另一个场的曲率。这个约束与目标对象错位。
+
+收敛性证明只证明“循环会停”，不证明“算法正确”。你写每轮要么 `processed` 增加，要么 `unprocessed` 减少，所以 O(|V|) 迭代终止。这个论证最多说明 finite termination，不说明复杂度是 O(|V|) 时间，因为每轮包含候选枚举、IK、圆柱碰撞、SELECT、可能的 PDE 重解。更严重的是，Phase B.5 Step 3 直接把“当前所有 unprocessed voxel 标记 SHADOW”，本来就会强行终止；这不是可打印性证明，而是放弃。
+
+PDE 后平滑的拓扑等价 claim 是错误的。你的能量
+`∫(|∇φ|² + λ|φ-φ_target|²)dV` 只是 Tikhonov / screened-Poisson 平滑。有限 `λ` 只能在某个范数意义下拉近 `φ` 和 `φ_target`，不能保证等值面同胚、同伦、Betti 数不变，也不能保证没有新 critical point。拓扑保持通常至少需要 `C¹` closeness、regular value margin、reach / feature-size 下界；而你的 `φ_target = L(v)/K` 是分段常数标签场，本身就不是光滑 Morse 函数。`λ` 太小时，解会接近 harmonic/Poisson 主导场，小体素桥、薄柄、局部分支完全可能消失或合并；`λ` 太大时，锯齿保留，PDE 平滑失去意义。
+
+你的自适应 `λ` 公式还和文字解释矛盾。`asn_satisfaction_rate ∈ [0,1]` 时，`λ_local = base_λ·(2 - rate)`，所以 rate 越低，λ 越大；但你文字说“ASN 关系紧的层用大 λ，ASN 关系松的层小 λ”。这说明公式不是从理论推导出来的，甚至方向没有统一。
+
+## 改进建议
+
+把正确性 claim 降级为：**Phase B 对被接受 voxel 的局部 predicate 做启发式过滤；Phase C/D 后必须重新验证连续层与连续轨迹。** 不要写“拓扑等价保证”。
+
+若要做理论，至少补三个硬条件：
+
+1. 对 `φ_smooth` 加 hard box constraint：`φ(v) ∈ [(L(v)-1/2)/K, (L(v)+1/2)/K]`，防止跨层。
+2. 对相邻支撑关系加 inequality：若 `u` 必须早于 `v`，强制 `φ(u) < φ(v) - ε`。
+3. 对等值面做 sampled C1/C2/C3/C4 re-certification；失败不是“增大 λ 再 solve”这么简单，而是返回 infeasible 或局部重构。
+
+---
+
+# 2. 算法新颖性
+
+**判定：目前“不成立”。可以包装成工程启发式，但不应宣称强新算法。**
+
+## 具体批评
+
+你的“构造波前 + 后平滑”并不明显超出 Wang 2018 的核心框架。Wang 2018 已经提出把体积分解为曲面层，再把曲面层分解为曲线路径，并在 accumulation sequence 中考虑 collision-free、supported deposition、尽量不阻挡未来层访问，以及 6DOF robot 相关的 tool-path 位置和姿态约束([Charlie C.L. Wang's Page][1])。他们还明确把曲面层分解条件写成：曲面 patch 可由 printer-head 访问且不碰撞之前层，且每层由之前层 dilation 支撑([Charlie C.L. Wang's Page][1])。这已经覆盖了你所谓 C1/C3 的主要思想，C2 也在 tool-path 阶段出现。
+
+你的表格说 Wang 2018 “C1 only；C2/C3/C4 不考虑”，这个说法过度简化。Wang 的 exact predicate 未必等同于你的 KR4 analytic IK 和圆柱 nozzle check，但它绝不是只考虑 ASN。审稿人只要读过 Wang，就会质疑你这个对比表。
+
+“Wang 2018 + 标准 Poisson smoothing”的质疑基本成立。你添加了显式 IK predicate、圆柱碰撞 predicate、SDF-Hessian 曲率 predicate，但没有给出新优化模型、新可行性定理、新数据结构或新复杂度界。Phase C 是 screened Poisson / Tikhonov 平滑；Phase D 是 marching cubes + validate；这些都是常规拼接。
+
+文献覆盖比你表中少得多。Xu et al. 2019 已经做过基于 embedded geodesic distance field 的多轴自由曲面 volume printing，并从 iso-level contours 构造 curved layers 和 support-free fabrication strategy([科学直通车][3])。Li et al. 2022 明确提出 vector-field-based curved layer slicing，同时考虑 support-free、collision-free 和 mechanical performance，并通过 Poisson 得到沿打印方向单调增加的 scalar field([科学直通车][4])。Jayakody et al. 2023 用 RBF field 修改 fabrication sequence field，目标包括减少 collision-inducing layer features、adaptive layer thickness、surface quality 和高 genus geometry 的 orientation fine-tuning([Khalifa University][5])。Jayakody et al. 2024 进一步提出 topology-aware framework，用 Reeb graph / Morse theory 识别 collision-prone regions 并优化 nozzle orientation field 以避免 global collisions 和 overhang 约束([科学直通车][6])。这些都直接压缩你的 novelty 空间。
+
+Ezair 2018 也不能被一句“空间填充曲线，无系统约束”带过。他们做的是一般 3D 曲线路径覆盖、可访问性排序、打印头几何近似和 curve ordering；他们还指出相关最优 subdivision/order 问题可归约为 NP-complete，因而使用启发式。这会反过来削弱你对贪心 Phase B 的理论信心。
+
+## 改进建议
+
+不要 claim “首次把 C1~C4 全部前置”。更安全的贡献表述是：
+
+> “A robot-specific constrained voxel wavefront heuristic that integrates analytic IK feasibility and conservative nozzle-body clearance checks during accumulation-field construction, followed by constrained scalar-field smoothing and post-certification.”
+
+但即使这样，SCI 论文也需要强实验支撑：多模型、多尺度、多 nozzle 半径、和 Wang / Xu / Li / Jayakody 类方法的 quantitative comparison。没有这些，现在更像课程项目或工程 prototype，不像可接受的 SCI 算法论文。
+
+---
+
+# 3. 每个 Phase 的具体缺陷
+
+**判定：你的担忧大多成立；其中 Phase B、C、D 是高风险，Phase A 的“低风险”判断不成立。**
+
+## Phase A：SDF Hessian 曲率
+
+SDF Hessian 在 voxel grid 上估曲率并不“标准低风险”。精确 signed distance 在 medial axis 附近不可微，STL sharp edge / corner 处曲率本来就是分布意义上的奇异；中央差分 Hessian 对 voxelization 噪声非常敏感。你用 0.5 mm grid、阈值 `1/r_n = 0.1 mm⁻¹`，看似分辨率还行，但 sharp cube corner 会被判成高曲率 SHADOW，哪怕立方体实际上最容易打印。
+
+公式也不完整。一般 level-set mean curvature 是 `div(∇φ/|∇φ|)`，若 `φ` 是 exact SDF 且 `|∇φ|=1`，才近似为 trace Hessian。你写 `0.5 * trace(Hess(SDF)/|∇SDF|)`，没有投影到切平面，也没有处理非 SDF 数值误差。更关键的是，你估的是输入几何 SDF 的 curvature，不是最终 curved layer 的 curvature。
+
+还有内部矛盾：A4 先把 `|H| > 1/r_n` 的 voxel 标成 SHADOW，B2 又跳过 `marked SHADOW`；但 B.5 Step 1 说放宽 C4 到 1.2×。如果已经永久标 SHADOW，救援根本救不回来。除非你引入 `C4_shadow_soft` 和 `hard_shadow` 两类，否则算法逻辑冲突。
+
+## Phase B：SELECT 规则
+
+“沿 G 投影排序 + 单连通”非常容易造成贪心局部最优。你 B2 只从 `L_layer_idx` 扩展，而不是从整个 active frontier `ASN(processed)\processed` 扩展。这会产生简单反例：底层有两个分支 A/B，下一层候选分裂成两片；SELECT 保留最大 A，B 留到下一轮。但下一轮只从 A 的 `L_layer_idx` 扩展，B 不再被考虑，最后被 SHADOW。这个失败不是复杂 mao 才有，Y 形分叉、双柱、环形结构都能触发。
+
+“强制单连通”也不合理。曲面层天然可能有多个 connected components，尤其是高 genus、分叉模型或同一 iso-level 上的多个岛。D2 后面还 “keep largest connected component per layer”，这相当于静默丢几何。你不能一边说“所有可达 voxel 都分配”，一边把非最大组件滤掉。
+
+G 场本身是 smooth normals，用于 tool orientation，不用于 layer assignment；但 SELECT 又用“沿 G 投影距离”控制层厚。这在叙事上自相矛盾。在强 curl 或多源波前区域，沿 G 的局部投影不定义全局顺序，会制造 cycle、反向推进和局部厚层。
+
+## Phase B.5：1.2× / 0.8×
+
+这两个 magic number 没有理论基础。更糟的是，放宽 C4 和 C3 后，接受的 voxel 已经不满足原始 C3/C4，却在 5.2 正确性里仍声称 C3/C4 由构造保证。如果 C3 是硬安全约束，0.8× margin 不是“救援”，是允许碰撞风险。如果 C4 是质量约束，1.2× 也必须被记录为 violation，而不能继续算“满足 C4”。
+
+Step 3 把所有 remaining unprocessed 标 SHADOW是过度破坏。候选为空可能是当前 frontier 策略错、SELECT 早期决策错、IK branch 选择错、λ/voxel 误差错，不代表剩余 voxel 全部不可打印。
+
+## Phase C：自适应 λ
+
+没有理论依据，而且公式方向和文字相反。`base_λ·(2-rate)` 在 rate 低时 λ 高；你文字说 ASN 关系松时小 λ 让 PDE 主导。审稿人会直接抓这个。
+
+更根本的是，λ 不能保证拓扑、约束、单调性或可达性。Li 2022 至少把 vector field 优化、support-free、collision-free、mechanical performance 与单调 scalar distance field 放在同一 pipeline 中讨论([科学直通车][4])；你的 Phase C 只是事后 smoothing，没有 hard constraints。
+
+## Phase D：ASN 检查与 re-solve
+
+“Per-vertex ASN check”没有形式化定义。ASN 是 voxel graph 邻域，vertex 是连续 mesh 点。你要先定义 vertex 属于哪个 voxel、上一层是什么、距离容差是多少、是否按法向投影检查 support patch，而不是说 sanity check。
+
+“失败则增加 λ 再 solve”没有终止保证。如果失败原因是 Phase B 贪心错误、C3/C4 不可行、marching cubes 改变连通性、或者目标拓扑本身不满足支撑关系，增大 λ 只会逼近锯齿标签，不能生成可行连续层。你需要最大迭代次数、失败分类、回滚到 Phase B 局部重构，而不是无限 re-solve。
+
+## 改进建议
+
+Phase B 必须改成维护全局 active frontier，而不是只看当前层。SELECT 不应丢弃小组件；应允许多 component layer，并分别排序打印。Phase B.5 应改成“failure diagnosis”，不要静默放宽硬约束。Phase C 应改成 constrained smoothing；Phase D 的 check 要从 voxel ASN 升级为连续几何 support/contact/collision certification。
+
+---
+
+# 4. 实施风险
+
+**判定：你的风险估计明显偏低；mao 头雕能否跑通目前没有可信保证。**
+
+## 具体批评
+
+SHADOW 率无法从当前描述给出可信数值。你没有给 mao 模型尺度、凹部最小 opening、feature radius、姿态、喷头真实几何、机器人基座位置。若鼻孔、耳廓、下巴/脖颈、头发凹槽等局部 opening 小于 nozzle body clearance，C3 会大面积失败；若曲率半径小于 10 mm，你的 C4 会把大量细节预标 SHADOW。`r_n=10 mm` 对 0.5 mm voxel 来说是 20 voxel 半径，这对头雕这类凹形模型非常苛刻。
+
+0.5 mm voxel 不自动等于 C3 精确。voxel occupancy 的几何误差可达约 `√3/2 h ≈ 0.43 mm`，再加机器人标定、TCP 偏差、挤出宽度、热胀冷缩和 STL/voxelization 误差。若 C3 margin 小于这个误差预算，就需要 sub-voxel SDF / ESDF 插值和最终 mesh-level swept-volume collision。只在 voxel grid 上查圆柱相交会出现 aliasing：漏检窄接触，也会误杀可行路径。
+
+实时性方面，Phase B 应该是 offline，不需要 4 ms；但计算量会很大。Wang 2018 报告过：对 186,735 个 0.8 mm voxel 的 candelabra，如果按逐 voxel sequence 做 collision detection，仅 collision detection 就可达 96 小时([Charlie C.L. Wang's Page][1])。你的 mao 是 ~570k voxels、0.5 mm grid、每候选做 IK + cylinder collision；如果用通用 BVH/FCL 或精确体素相交，时间很可能是小时到天，不是“15–20 天实现、集成测试 3–5 天”这种低风险工程量。
+
+IK 不是瓶颈，collision 和重复验证是瓶颈。解析 IK 单次可能很快，但每个 voxel 有多个 IK branch、多个 yaw 自由度、奇异规避、joint continuity、self-collision。你当前 C2 只查一个 `R_tool` 和一个 `q`，实际实现若认真做，会膨胀成多 pose 搜索。
+
+## 改进建议
+
+用 ESDF / signed distance acceleration 做 conservative cylinder clearance：对圆柱扫掠体采样并用 trilinear SDF 查询，保守 margin 至少覆盖 voxel error + calibration error。最终路径必须用 mesh/BVH swept collision 再验证。
+
+性能实验必须报告：候选数、IK 调用次数、collision 调用次数、平均 collision 时间、总时间、SHADOW 分类、不同 voxel size 下的结果。对 570k voxel，先做 1 mm / 0.8 mm coarse-to-fine，不要直接 0.5 mm 全量贪心。
+
+---
+
+# 5. 现有方法对比
+
+**判定：你当前对比表过度简化，部分说法会被审稿人认为 strawman。**
+
+## 具体批评
+
+“PDE 因 G 场 curl 失败”这个说法过度泛化。标量势 `φ` 的梯度当然是 curl-free，所以任意给定非保守 G 不能被完全积分成 `∇φ`；但这不等于“所有有 curl 的 G 都不能 PDE”。很多方法会优化 G、做投影、引入 weighted/RBF field、解约束 Poisson、或只要求某种单调性。Li 2022 就明确用两个 vector fields 和 Poisson 生成单调 distance scalar field，且考虑 support-free、collision-free 和 mechanical performance([科学直通车][4])。你只能说“我当前这版纯 PDE baseline 在 mao 上失败”，不能说“PDE 范式因 curl 在复杂几何上失败”。
+
+Wang 2018 的 shadow region 不是“没解决”。Wang 明确提出 voxel shadowing，用于避免 advancing front 产生 inaccessible regions，并引入 inverse peeling 启发式来减少 shadowed regions 和 failure cases([Charlie C.L. Wang's Page][1])。你可以说 Wang 的 heuristic 对某些局部仍可能失败，或未显式处理你的 KR4/C4 predicate；但不能说 shadow region 完全没处理。
+
+Dumas 2014 不是你的直接 baseline，但它覆盖了 support/stability 物理层面的支撑问题，不能只作为无关 support generation 带过。Hu 2015 是 support slimming / orientation-driven model deformation，属于减少支撑结构，不是多轴曲面层，但它说明支撑约束可以通过形状/方向优化处理([研究探索者 曼彻斯特大学][7])。Gao/RevoMaker 类工作是多方向/旋转平台，Wang 2018 已经指出其绕 cuboidal core 的限制([Charlie C.L. Wang's Page][1])。Ezair 2018 覆盖了 3D 曲线路径、可访问性排序和打印头几何，不应写成“无系统约束”。
+
+近年更相关的 baseline 是 Xu 2019、Li 2022、Jayakody 2023/2024，而不是只拿 Wang 2018 和 Ezair 2018。Jayakody 2024 明确针对 high-genus / bifurcating models 的 topology-aware global collision-free curved layer AM([科学直通车][6])；这直接打中你 mao / 强凹 / 高拓扑复杂度的场景。
+
+## 改进建议
+
+baseline 至少包括：
+
+Wang/Dai 2018 voxel accumulation field；Xu 2019 geodesic distance curved layers；Li 2022 vector-field-based curved layer slicing；Jayakody 2023 RBF/convexity/surface-quality method；Jayakody 2024 topology-aware collision-free method；再加你自己的 pure PDE baseline 和 planar slicer with supports。
+
+对比指标不能只写“成功/失败”。要写 SHADOW ratio、C1/C2/C3/C4 violation count、post-smoothing violation count、层连通数、Betti 数变化、Hausdorff error、layer thickness variance、路径长度、retraction 次数、IK discontinuity 次数、collision clearance min/mean、总时间和实际打印成功率。
+
+---
+
+# 6. 可证伪性与失败模式
+
+**判定：你当前失败模式描述严重不足。SHADOW > 30% 只是粗暴 abort，不是完整 failure model。**
+
+## 具体批评
+
+除了 SHADOW > 30%，至少有这些失败模式：
+
+1. **贪心早期错误**：SELECT 丢掉分支，后续永远回不去。
+2. **连续化破坏离散可行性**：Phase B 的 voxel 标签可行，Phase C/D 的等值面不可行。
+3. **拓扑变化**：PDE 平滑导致层合并、分裂、细桥消失、洞被填。
+4. **IK branch discontinuity**：每点存在 IK，但连续路径不存在平滑 joint trajectory。
+5. **intra-layer collision**：Phase B 只查 previous processed，Phase E 打印同层时碰撞。
+6. **nozzle swept-volume collision**：静态 voxel center cylinder 通过，连续插补扫掠体失败。
+7. **C4 false positive / false negative**：cube corner 被误杀，saddle 高主曲率被放过。
+8. **D2 丢几何**：keep largest component 造成体积缺失。
+9. **λ loop 不终止**：增加 λ 仍达不到 95% ASN pass。
+10. **机器人动力学失败**：速度/加速度/jerk 或 RSI 插补失败。
+11. **材料工艺失败**：C1 adjacency 通过，但熔融材料下垂、翘曲、桥接失败。
+
+简单 case 也会出错。立方体：SDF Hessian 在棱角处不稳定或高曲率，C4 可能把角点/边缘 SHADOW，尽管 cube 是最基础可打印形状。球：若半径小于 10 mm，你的 C4 会整体失败；若半径足够大但 λ 太小，`φ_smooth` 可能偏向简单上下 scalar field，和构造标签拓扑不同。Y 形双分支：SELECT 单连通 + 只从当前层扩展，会把未选分支变成 shadow。环/torus：等值面自然多 component 或有洞，D2 largest component 会丢区域，PDE 可能改 Betti 数。鞍形薄壳：`H≈0` 通过 C4，但主曲率大，喷头 clearance 失败。
+
+我会这样构造 adversarial input：一个从 build plate 长出的双柱模型，两个柱在顶部连接成 U 形，中间间隙略小于 `2r_n + margin`。底部两柱都可打印；某一层候选分裂成左右两片。SELECT 保留较大一片，另一片被留到“下一轮”。由于下一轮只从当前层扩展，另一柱不会继续增长，最后被 SHADOW。这个反例不需要复杂头雕，几十个 voxel 就能击穿 Phase B 的“所有可达 voxel 被分配” claim。
+
+另一个 adversarial input 是薄 saddle ribbon：`k1 = -k2`，平均曲率接近 0，C4 通过；但局部最小 opening 小于 nozzle body radius，C3 只有在高精度 swept collision 才能发现。第三个是带 1-voxel neck 的 handle：Phase B 标签保留 handle，Phase C 小 λ 后 handle 在等值面中消失，拓扑不等价。
+
+## 改进建议
+
+论文里必须主动放 failure gallery。不要只写 “infeasible geometry / λ 选错”。把失败分成：geometric clearance infeasible、robot kinematic infeasible、greedy ordering failure、smoothing topology failure、trajectory dynamics failure、material process failure。每类给一个 synthetic benchmark。
+
+---
+
+# 7. 论文叙事
+
+**判定：当前强叙事不成立；弱叙事可救，但要大幅降 claim。**
+
+## 具体批评
+
+如果只跑通 bunny + armadillo，mao 部分 SHADOW，标题不能叫 “Support-Free Curved Slicing for General Multi-Axis 3D Printing”。那会被审稿人抓住“general”和“support-free”。更合适的标题是：
+
+> **Constraint-Aware Voxel Wavefront Slicing for Multi-Axis FDM: A Heuristic Framework with Post-Smoothing and Certification**
+
+或者：
+
+> **Toward Robot-Specific Support-Free Curved Layer Planning via Constrained Voxel Wavefronts**
+
+“首次把 C1~C4 全部前置”站不住。Wang 已经把 support/accessibility/collision 的制造条件嵌入 accumulation field；Li 2022/Jayakody 2023/2024 已经把 support-free、collision-free、curvature/surface quality、topology-aware orientation 等因素纳入曲面层生成或优化([Charlie C.L. Wang's Page][1])。你最多 claim “explicitly incorporating KR4 analytic IK and a conservative nozzle-cylinder clearance predicate into a Wang-style voxel wavefront.”
+
+SCI Q4/EI 是否足够：以当前理论和实验设计，不够。若改成工程算法论文，可能够 EI 或低区应用型期刊，但必须去掉不正确的拓扑/正确性证明，加入系统实验、消融和失败分析。若坚持“新算法 + 理论保证”，现在会被拒。
+
+## 实验设计建议
+
+实验至少要有四组：
+
+第一组是 synthetic falsification：cube、sphere、torus、Y-branch、U-bridge、saddle ribbon、narrow cavity、two-island bottom。目标是证明你的算法何时失败，而不是只展示成功图。
+
+第二组是 standard models：bunny、armadillo、fertility、candelabra、mao/head、high-genus model。每个模型跑多尺度：0.5/0.8/1.0 mm voxel，多 nozzle radius：5/10/15 mm。
+
+第三组是 baseline comparison：Wang 2018、Xu 2019、Li 2022、Jayakody 2023/2024、pure PDE、planar slicer with support。若无法复现全部，至少实现可比 proxy，并清楚说明。
+
+第四组是 ablation：去掉 C2、去掉 C3、去掉 C4、去掉 SELECT 单连通、去掉 B.5、不同 λ、无 PDE / PDE / constrained PDE。报告每一步之后的 violation count，尤其是 Phase B 后和 Phase C/D 后的差异。
+
+关键指标：SHADOW rate、体积覆盖率、support violation、IK failure、collision minimum clearance、curvature violation、层数、层厚分布、component 数、Betti 数变化、路径长度、retraction 次数、joint velocity/acceleration/jerk violation、planning time、physical print success/failure。
+
+---
+
+## 最后给出审稿式结论
+
+按现在文本，我会给的核心评语是：
+
+**Reject / major revision。**
+原因不是实现不完整，而是理论 claim 与算法实际输出不匹配。Phase B 的离散局部检查不能推出 Phase C/D/E 的连续可制造性；`λ|φ-φ_target|²` 不能保证拓扑等价；C1/C4 定义本身有形式化错误；B.5 会违反原始硬约束；SELECT 会制造可达分支的假 SHADOW；文献对比低估了 Wang 2018 和后续 vector-field / topology-aware curved slicing 工作。当前贡献更像“Wang-style voxel accumulation + extra predicate filters + screened-Poisson smoothing”的工程组合，而不是有充分新颖性和正确性的新算法。
+
+[1]: https://mewangcl.github.io/pubs/SIG18RobotVolPrint.pdf "Support-Free Volume Printing by Multi-Axis Motion"
+[2]: https://www.jdumas.org/publication/2014/scaffoldings/ "Bridging the Gap: Automated Steady Scaffoldings for 3D Printing | Jérémie Dumas's Homepage"
+[3]: https://www.sciencedirect.com/science/article/abs/pii/S0010448518305384 "Curved layer based process planning for multi-axis volume printing of freeform parts - ScienceDirect"
+[4]: https://www.sciencedirect.com/science/article/abs/pii/S0736584522000503 "Vector field-based curved layer slicing and path planning for multi-axis printing - ScienceDirect"
+[5]: https://khazna.ku.ac.ae/en/publications/convexity-and-surface-quality-enhanced-curved-slicing-for-support/ "
+        Convexity and Surface Quality Enhanced Curved Slicing for Support-Free Multi-Axis Fabrication
+      \-  Khalifa University"
+[6]: https://www.sciencedirect.com/science/article/pii/S2214860424002938 "Topological awareness towards collision-free multi-axis curved layer additive manufacturing - ScienceDirect"
+[7]: https://research.manchester.ac.uk/en/publications/support-slimming-for-single-material-based-additive-manufacturing/ "
+        Support slimming for single material based additive manufacturing
+      \-  Research Explorer The University of Manchester"

@@ -1,0 +1,902 @@
+## 先确认 mao 更新后的结论
+
+**重度 smoothing 后的 mao 走完整 dry pipeline 并做到 trajectory 全 OK，是“可争取”的，不是“可保证”的。**
+如果它真的被正则化成“光头胖脸 + 模糊五官”的近凸头型，主要强凹结构被填掉，那么 v6 的失败瓶颈会从“几何凹陷不可达”转移到：
+
+1. **模型摆位 / KR4 工作空间**：点位 IK 可能都存在，但路径级 cyclic DP 仍可能因为腕翻转或关节限速失败。
+2. **喷头本体 clearance**：鼻翼、下巴、颈部、耳朵残余凹陷如果没有完全填平，`r_n=10mm, h_n=30mm` 的圆柱仍可能撞。
+3. **transition/retract 段**：正常打印段 OK，不代表 OK→OK 或 OK→FAIL→OK 的空行程 OK。
+4. **KRL PTP 轨迹不等于几何直线**：如果你用 PTP，实际 TCP/喷头扫掠路径可能和你设计的“⊓形”几何路径不同。
+5. **smoothing 后模型偏差叙事**：旧的 `Hausdorff ≤ 0.5mm` 不能再保留；抹掉 `<5mm` 细节时，局部 Hausdorff 很可能是毫米级甚至更大。
+
+所以我给 mao 的新定义是：
+
+> **regularized-mao must be fully dry-run feasible after geometry regularization, but the original mao is not claimed feasible.**
+
+这可以写论文，但必须把模型名写清楚：`mao_original`、`mao_regularized`。不要让读者以为原始毛主席头雕 full OK。
+
+---
+
+# Q1：KRL OK segments 之间的 retract/travel 怎么生成？
+
+## 判定
+
+你 v4 的“⊓形 transition”可以复用，但不能原封不动。它原本是**正常层间衔接**，现在变成**跳过失败段后的非连续重定位**，必须新增：
+
+* transition 段自身 collision check；
+* transition 段 IK check；
+* transition 段是否破坏打印逻辑的标记；
+* 如果 transition 也失败的 fallback。
+
+v6 里你已经定义 Stage 6 输出 `trajectory.csv` status，并且 KRL 只导出 OK segments；这就必然要求 OK segments 之间有安全连接，而不是简单拼接。
+
+## 推荐 transition 生成逻辑
+
+不要只用 4 个 keypoint。我建议用 6 点版本：
+
+```text
+P0 = last TCP of OK segment A
+
+P1 = local retract:
+     P0 + d_retract * (-tool_z_end)
+
+P2 = world lift:
+     same x,y as P1, z = z_safe
+
+P3 = horizontal travel:
+     x,y from target approach, z = z_safe
+
+P4 = local approach:
+     first TCP of OK segment B + d_retract * (-tool_z_start)
+
+P5 = first TCP of OK segment B
+```
+
+其中：
+
+```text
+d_retract = max(5 mm, 0.5*r_n, bead_width + collision_margin)
+          = 通常 5~10 mm
+
+z_safe = max(
+    z_max_printed_in_bbox(A,B),
+    z_max_failure_region,
+    z_max_current_layer,
+    z_max_next_target
+) + h_nozzle_margin
+```
+
+`h_nozzle_margin` 不应固定 5 mm。喷头体长 `h_n=30mm`，只把 TCP 抬高 5 mm 可能仍让喷头圆柱扫到已打印部分。保守建议：
+
+```text
+z_safe = local_max_z + max(10 mm, r_n, 0.5*h_n)
+```
+
+也就是至少 15 mm；如果空间允许，直接用：
+
+```text
+z_safe = global_printed_z_max + 20~30 mm
+```
+
+## PTP 还是 LIN？
+
+你的“全程 PTP，禁用 `$APO` blending”可以保留为工程简化，但有一个硬条件：
+
+> **PTP transition 必须按关节插值后的实际喷头姿态做 collision validation。**
+
+PTP 不是 Cartesian 直线，TCP 可能绕一条你没设计的弧线。若你不想精确模拟 KUKA 内部轨迹，就不要声称“⊓形几何路径保证安全”。更稳的是：
+
+* `P0→P1`：LIN，低速，wire_off；
+* `P1→P2`：LIN；
+* `P2→P3`：PTP 或 LIN；
+* `P3→P4`：LIN；
+* `P4→P5`：LIN。
+
+如果论文只做 dry-run，全部用 LIN 更容易解释。若实机上 LIN 姿态插补不稳定，再降级到 PTP，但必须 dense sample + collision check。
+
+## transition 是否要 collision check？
+
+必须 check。顺序：
+
+```text
+1. 先检查打印段 OK。
+2. 再生成 transition。
+3. 对 transition 做 IK + velocity + singularity + collision check。
+4. transition 通过后，才允许把两个 OK segment 合并导出 KRL。
+```
+
+检查对象：
+
+```text
+transition nozzle capsule/cylinder vs accumulated printed mesh
+transition nozzle vs final/regularized part
+transition joint trajectory vs joint limits/singularity
+```
+
+FCL 本身支持 collision/distance/continuous collision 类查询；但在你的 12 周计划里，可以先用 SDF/capsule sampling proxy 做 transition validation，FCL 作为最终增强。([GitHub][1])
+
+## transition 也撞怎么办？
+
+按这个 fallback：
+
+```text
+Fallback 1:
+    z_safe += 10 mm，最多重试 3 次。
+
+Fallback 2:
+    强制 tool_z 切换为 vertical-safe orientation，
+    yaw 重新选，重新 IK DP。
+
+Fallback 3:
+    在 z_safe 平面做 2D detour：
+        inflated obstacle bbox / convex hull
+        尝试四个 corner waypoint:
+            left, right, front, back
+
+Fallback 4:
+    如果仍失败：
+        不导出该连接。
+        将后续 OK segment 标记为 DISCONNECTED_OK。
+```
+
+对 mao 你现在要求 trajectory 全 OK，所以如果 transition 失败，就不能说 mao dry-run 全 OK。你必须回到：
+
+```text
+更强 smoothing
+换 model_transform
+提高 z_safe
+改变切片方向 / build direction
+```
+
+## OK→FAIL→OK 的特殊问题
+
+如果中间失败段是打印材料的一部分，被跳过后再打印后续 OK 段，物理上可能失去支撑或断料连续性。对于 dry-run 可以跳过，但 KRL 输出必须区分：
+
+```text
+MOTION_OK       # 机器人运动可执行
+PRINT_OK        # 可真实沉积
+DISCONNECTED_OK # 运动可执行，但中间跳过了材料
+```
+
+真实打印只允许导出 `PRINT_OK`。演示 dry-run 可以导出 `MOTION_OK` 或 `DISCONNECTED_OK`，但 wire 必须 off。
+
+---
+
+# Q2：FCL 在 Windows + MSVC 的 build 路径
+
+## 判定
+
+**v6 不应把 FCL 作为必须项。**
+建议主线用 **B：libigl/SDF + capsule sampling collision proxy** 跑完 12 周；FCL 作为 Week 8–9 的增强项。原因很简单：Windows + MSVC + FCL 不是算法主贡献，不能让它卡死毕业。
+
+## A. vcpkg 装 FCL
+
+优点：
+
+* 这是最正规路径；vcpkg 当前有 `fcl` 包，依赖包括 `ccd`、`eigen3`、`octomap`，并使用 vcpkg CMake 配置。([vcpkg][2])
+* Visual Studio 2022 已把 vcpkg 作为可安装组件，对 Windows 用户比手动编译友好。([Microsoft for Developers][3])
+* FCL 能做 collision、distance、continuous collision detection / tolerance verification 类查询，功能上正好匹配你的 Stage 6。([ROS Index][4])
+
+缺点：
+
+* Release/Debug、static/dynamic triplet、依赖库 ABI、Octomap/CCD 链接都可能消耗时间。
+* 你还要把 nozzle cylinder/capsule、printed mesh BVH、accumulated mesh 更新策略全接进去。
+* 即使用 FCL，也不等于你能 4ms 内实时查；你本来已经把 Stage 6 定义为离线验证，这一点必须坚持。
+
+推荐命令方向：
+
+```bat
+vcpkg install fcl:x64-windows
+```
+
+或如果你想减少 runtime DLL 麻烦：
+
+```bat
+vcpkg install fcl:x64-windows-static
+```
+
+CMake 里用 toolchain：
+
+```bat
+cmake -G "NMake Makefiles" ^
+  -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake ^
+  ..
+```
+
+## B. libigl SDF + capsule sampling proxy
+
+这是我推荐的毕业主线。
+
+做法：
+
+```text
+for each trajectory frame:
+    sample nozzle capsule/cylinder surface and axis
+    query signed/unsigned distance to printed mesh SDF/AABB
+    collision if min_distance < safety_margin
+```
+
+优点：
+
+* 你本来就有 SDF / voxel / libigl 管线。
+* 容易并行。
+* 容易解释。
+* 容易调 conservative margin。
+* 不依赖 FCL Windows build 成功。
+
+缺点：
+
+* 不是精确 mesh-mesh collision。
+* 对薄特征和尖角依赖采样密度。
+* 需要把喷头半径 inflate，例如：
+
+```text
+r_eff = r_n + voxel_size + calibration_margin
+```
+
+我建议论文里把它叫：
+
+> Conservative capsule-sampling collision validation.
+
+不要叫 exact FCL validation。
+
+libigl 有 signed distance / AABB 相关接口，适合做这类距离查询 proxy。([libigl][5])
+
+## C. igl::AABB BVH 简化版
+
+它其实是 B 的一种实现。
+
+优点：
+
+* 不用外部 FCL。
+* 对静态 mesh 最近距离查询够用。
+* 和 libigl 生态一致。
+
+缺点：
+
+* 你仍然要 sample capsule/cylinder。
+* 不是连续碰撞检测。
+* 对 accumulated printed mesh 的重建/更新仍要自己做。
+
+## 最终推荐
+
+实施顺序：
+
+```text
+Week 1–8:
+    必须实现 B/C：SDF + capsule sampling proxy。
+
+Week 8:
+    并行尝试 vcpkg FCL。
+
+如果 FCL 一天内装通：
+    用 FCL 做 Level 2 final validation。
+
+如果 FCL 超过一天还卡：
+    放弃 FCL，论文写 conservative SDF/capsule validation。
+```
+
+这不会削弱毕业主线。FCL 是增强，不是核心创新。
+
+---
+
+# Q3：mao 0.8mm IK field 计算量估算
+
+## 判定
+
+你的估算 **270k × 96 × 16 μs ≈ 415 秒 ≈ 7 分钟**，数量级合理，但偏保守。它假设每个 voxel 都做 96 次“完整 IK + SVD”。实际可以压到 1–2 分钟，甚至更低。
+
+v6 目前 Stage 2 Pass 3 是每个 voxel、12 yaw、8 branches 计算 `p_ik`，Stage 5 又对路径点枚举 12 yaw × 8 branch 候选。
+
+## 关键优化
+
+### 1. IK 函数一次返回 8 branches，不要调用 8 次
+
+对每个 `(v, yaw)`：
+
+```text
+solutions = analytical_IK_all_branches(v, R_yaw)
+```
+
+不要：
+
+```text
+for branch:
+    analytical_IK(...)
+```
+
+这样从 `270k × 96` 次 IK 变成 `270k × 12` 次 IK。branch loop 只是筛解。
+
+### 2. SVD 不要对所有 branch 做
+
+顺序改成：
+
+```text
+workspace quick reject
+analytic IK
+joint limit quick reject
+cheap singularity proxy
+only top candidates -> full Jacobian SVD
+```
+
+KR4 球腕结构下，腕奇异可以先用 `|sin(q5)|` 或 `|q5|` proxy，肘/肩风险也可以先用 joint-space margin proxy。最终 `σ_min(J)` 只对每个 voxel 的 top 1–3 candidates 算。
+
+### 3. p_ik 用 coarse grid
+
+`p_ik` 是 scalar field bias，不是最终判定。可以：
+
+```text
+0.8mm slicing grid
+1.6mm IK field grid
+trilinear interpolate p_ik
+```
+
+这会把 voxel 数降到大约 1/8。对 mao 来说，从 270k 变 30k–40k。
+
+### 4. 只在 active band / inside voxels 算
+
+不要对 bbox 所有 voxel 算。只对：
+
+```text
+inside Ω
+or near-layer / near-surface band
+or Dijkstra reachable voxels
+```
+
+270k 是 bbox 估算，真实 inside voxels 可能少很多。
+
+### 5. 多线程
+
+这是 embarrassingly parallel。OpenMP / TBB 都可。
+
+推荐：
+
+```cpp
+#pragma omp parallel for schedule(dynamic, 256)
+for (int idx = 0; idx < active_voxels.size(); ++idx) {
+    compute_pik(active_voxels[idx]);
+}
+```
+
+注意避免每个 voxel 动态分配 Eigen 对象；用 thread-local buffers。
+
+## 目标时间
+
+保守目标：
+
+```text
+full 0.8mm p_ik, serial: 5–8 min
+full 0.8mm p_ik, 8 threads: 1–2 min
+coarse 1.6mm p_ik, 8 threads: <30 s
+```
+
+毕业版建议默认：
+
+```text
+--ik-field-resolution-factor 2
+```
+
+也就是 0.8mm slicing、1.6mm IK field。最终路径级 IK DP 才用全精度。
+
+---
+
+# Q4：libigl exact_geodesic 失败的 fallback 触发条件
+
+## 判定
+
+优先 stitching 修复；失败后按 **component-level fallback**，不要整层全 fallback。
+
+libigl 的 exact geodesic 是三角网格表面上的离散测地距离，适合你 Stage 4 的 geodesic contour 思路，但它不是路径生成的强保证。([libigl][6])
+
+## 触发流程
+
+每个 layer component 独立处理：
+
+```text
+1. run geodesic contour extraction
+2. run polyline stitching
+3. evaluate path quality
+4. if quality pass:
+       use geodesic paths
+   else:
+       fallback raster for this component only
+```
+
+## stitching 后的通过标准
+
+建议写死这些阈值：
+
+```text
+closed_loop_ratio >= 0.95
+open_endpoint_count <= 2 per component
+max_endpoint_gap <= 1.5 * resample_step
+coverage_error <= 0.75 * path_spacing
+self_intersection_count == 0 或低于阈值
+polyline_length > min_length
+```
+
+其中：
+
+```text
+resample_step = 0.2mm
+max_endpoint_gap = 0.3~0.5mm
+path_spacing = bead_width 或用户指定
+```
+
+你之前遇到的 “N-1 边导致开放链” 应该先由 stitching 修；只有修完还达不到这些指标，才 fallback。
+
+## 是否允许部分 geodesic、部分 raster？
+
+允许，而且应该这样。
+
+```text
+component A: geodesic OK
+component B: geodesic fail -> raster
+component C: too small -> skip or mark SMALL_COMPONENT
+```
+
+输出 metadata：
+
+```json
+{
+  "layer": 17,
+  "component": 2,
+  "path_mode": "RASTER_FALLBACK",
+  "reason": "OPEN_CHAIN_RATIO_HIGH"
+}
+```
+
+## raster 路径怎么生成？
+
+不要投影成 2D 后再简单画线再反投影，这在曲面层上容易失真。用 **plane-family intersection raster**：
+
+对每个 layer component：
+
+```text
+1. PCA 得到主方向 e1, e2。
+2. 选 raster direction e1。
+3. 定义标量 s(p) = dot(p, e1)。
+4. 对 s = s0 + i * path_spacing：
+       用平面 dot(x,e1)=s 切 layer mesh。
+5. 得到一组在曲面 mesh 上的 intersection polylines。
+6. stitching + resampling。
+7. 相邻线蛇形排序。
+```
+
+这比“投影到某个平面再反投影”稳，因为线段天然落在 layer mesh 上。
+
+如果 layer 曲率太大，PCA raster 会覆盖不均。fallback 再细分：
+
+```text
+if component normal variation > threshold:
+    split component into patches by normal clustering
+    raster each patch
+```
+
+毕业版可以先不做 patch split，只记录 normal variation。
+
+---
+
+# Q5：model_transform 设计
+
+## 判定
+
+我认可 A：**手工 YAML 配置**。自动 placement 推迟到 future work。
+
+自动求最佳 placement 是另一个规划问题，会吃掉 1–3 周，而且很难写清楚。v6 主贡献是 scalar field + IK-aware validation，不是全局装夹优化。
+
+## YAML 应该包含什么
+
+```yaml
+model_transform:
+  scale: 1.0
+  rotation_rpy_deg: [0, 0, 0]
+  translation_mm: [420, 0, 80]
+
+build:
+  build_direction: [0, 0, 1]
+  platform_z: 0.0
+  safe_z: 120.0
+
+robot:
+  base_frame: "KR4_BASE"
+  tool_frame: "FDM_TCP"
+
+notes:
+  chosen_by: "manual workspace calibration"
+```
+
+## 谁决定 transform？
+
+操作者决定。依据：
+
+```text
+模型中心落在 KR4 dexterous workspace 中部
+TCP 距离 base 不靠近 r_min/r_max
+主要法向方向不迫使 q5 靠近腕奇异
+平台位置与喷头安全高度足够
+```
+
+## 如何避免审稿人说你调参作弊？
+
+写清楚：
+
+```text
+All ablation variants use the same model_transform per model.
+The transform is selected once before weight ablation.
+No per-method placement tuning is performed.
+```
+
+可以加一个轻量 sanity check：
+
+```text
+sample 5k surface points
+compute pointwise IK success heatmap
+manual transform accepted if pointwise IK > 90%
+```
+
+但不要做自动优化。
+
+## B/C 是否完全不做？
+
+可以留一个 future work：
+
+```text
+Automatic placement optimization can maximize a weighted score of pointwise IK margin, collision-risk margin, and layer-field quality.
+```
+
+当前不做。
+
+---
+
+# Q6：ablation baseline 实现策略
+
+## planar slicing 选哪个？
+
+我建议 **A：自己写 planar slicing proxy**。
+
+CuraEngine 是成熟开源 G-code slicing engine，官方仓库也明确它用于把 3D 模型转换成 G-code；但它输出的是传统 3 轴 FDM G-code，不是你的 6 轴曲面层、IK DP、collision validation pipeline。([GitHub][7])
+如果你用 Cura CLI，再把 G-code 转成你自己的 `trajectory.csv`，会引入一堆不公平因素：
+
+* Cura 的路径规划、回抽、填充、速度策略与你不同；
+* G-code 坐标不是 KR4 6 轴路径；
+* 很难把 Cura 的路径接入你的 nozzle collision / IK DP；
+* 论文指标格式不统一。
+
+## 自己写 planar baseline 怎么做
+
+用同一套 pipeline：
+
+```text
+1. 用 z = k*h 平面切 mesh。
+2. 得到 planar layer contours。
+3. 用同样的 path resampling。
+4. 用同样的 IK DP。
+5. 用同样的 SDF/FCL collision validation。
+6. 输出同样 metrics。
+```
+
+这才公平，因为变量只有：
+
+```text
+layer geometry: planar vs curved scalar-field
+```
+
+而不是 slicer 软件差异。
+
+## v4 PDE baseline 怎么定位？
+
+v4 PDE 可以保留，但它不是主 baseline。它更适合叫：
+
+```text
+failure-mode comparison
+```
+
+主 baseline 应该是：
+
+```text
+B0: planar Z slicing
+B1: geometric Dijkstra, δ=0
+B2: clearance-weighted Dijkstra, δ=0 but α>0
+B3: proposed IK-aware, δ>0
+```
+
+v4 PDE 放图：
+
+```text
+pure PDE / old method produces fragmented layers on mao or unstable components
+```
+
+不要让 v4 PDE 成为唯一对照。否则审稿人会说你只打败了自己旧版本。
+
+## 最小公平表格
+
+```text
+Method                  Coverage  BrokenLayer  IKPass  CollisionFail  Runtime
+Planar-Z                ...
+Dijkstra δ=0            ...
+Dijkstra + clearance    ...
+Proposed + IK field     ...
+```
+
+对 mao_regularized 单独一列写：
+
+```text
+Geometry deviation from mao_original
+```
+
+---
+
+# Q7：是否需要复现 Wang 2018 / Li 2022 / Jayakody 2024？
+
+## 判定
+
+12 周内不需要，也不现实。
+但论文里不能把他们的 reported numbers 放进同一个 quantitative comparison 表里当作直接对比。
+
+## 审稿人会不会接受？
+
+SCI Q4 / EI 工程型论文一般可以接受：
+
+```text
+detailed related work + internal baselines + ablation + one physical/dry-run demonstration
+```
+
+前提是你不要写：
+
+```text
+our method outperforms Wang/Li/Jayakody quantitatively
+```
+
+你可以写：
+
+```text
+Compared with prior classes of methods, our implementation emphasizes robot-specific pointwise IK bias in scalar-field construction and full KR4 dry-run validation.
+```
+
+但不要写：
+
+```text
+better than Jayakody 2024
+```
+
+## reported numbers 怎么用？
+
+可以做一个 **capability table**，不是 performance table：
+
+```text
+Method        Curved layers  Support-free  Collision-aware  IK-aware field  Robot dry-run
+Wang 2018     yes            yes           heuristic        no              no/limited
+Li 2022       yes            yes           yes              not KR4-specific no
+Jayakody 2024 yes            yes           yes              orientation      no KR4 pipeline
+Ours          yes            evaluated     evaluated        pointwise KR4    yes
+```
+
+如果引用他们 reported numbers，必须标：
+
+```text
+Reported in original paper; not directly comparable due to different robot/nozzle/model/resolution.
+```
+
+## 必须自己跑的 baselines
+
+至少这三个：
+
+1. **Planar-Z**：你自己实现。
+2. **δ=0 geometric/clearance Dijkstra**：同代码关掉 IK field。
+3. **proposed δ>0**：打开 IK field。
+
+再加：
+
+4. **v4 PDE qualitative failure**：只做图，不进主数值胜负表。
+
+这对毕业/低区论文够用。
+
+## 什么情况下必须复现外部方法？
+
+如果你论文 claim 是：
+
+```text
+state-of-the-art performance
+```
+
+那必须复现至少一个外部方法。
+
+但你的安全 claim 应该是：
+
+```text
+practical robot-aware pipeline
+```
+
+那就不必完整复现 Wang/Li/Jayakody。
+
+---
+
+# 针对 mao_regularized 的最终执行建议
+
+## 先定义 preprocessing acceptance gate
+
+mao 重度 smoothing 后，进入 full dry pipeline 前必须满足：
+
+```text
+1. no local opening narrower than 2*r_n + margin
+2. curvature violation ratio < 5%
+3. pointwise IK success on sampled surface > 95%
+4. p_ik high-penalty voxel ratio < 10%
+5. layer broken ratio < 5%
+6. path generation success > 95% components
+```
+
+如果这些 gate 不过，不要继续调 DP/FCL，先回 Stage 0 改 smoothing 或 model_transform。
+
+## Hausdorff 叙事必须改
+
+原来 v6 Stage 0 还写过 `Hausdorff ≤ 0.5mm` 和法向偏离 ≤5°。但你现在明确要抹掉 `<5mm` 细节，这两个约束不可能同时成立。
+
+改成两套指标：
+
+```text
+cleaning deviation:
+    small repair / decimation, target ≤0.5mm
+
+regularization deviation:
+    heavy smoothing, report actual deviation
+    no hard ≤0.5mm claim
+```
+
+论文写：
+
+> The regularized Mao model is intentionally not a faithful reconstruction. It is a manufacturability-regularized head-shape benchmark. We quantify the loss using Hausdorff distance, normal deviation, silhouette IoU, and volume change.
+
+## mao 全 OK 的实际概率
+
+如果你把 mao 正则化到近凸头型，并手工 model_transform，**全 OK dry-run 概率可以做到中高**。关键不是 Dijkstra field，而是：
+
+```text
+cyclic DP 是否出现 wrist flip
+transition 是否 collision-free
+tool orientation 是否稳定
+FCL/SDF proxy 是否过度保守
+```
+
+所以 mao 的调试顺序应该是：
+
+```text
+1. geometry-only layers OK
+2. path components OK
+3. pointwise IK OK
+4. cyclic DP OK
+5. printed-segment collision OK
+6. transition collision OK
+7. full KRL export OK
+```
+
+不要反过来一开始就调 FCL。
+
+---
+
+# 给 CLI #2 的具体新增任务
+
+## 新模块 1：TransitionPlanner
+
+```text
+文件：
+src/trajectory/TransitionPlanner.cpp
+src/trajectory/TransitionPlanner.h
+
+输入：
+SegmentEnd A
+SegmentStart B
+PrintedPartSnapshot printed
+NozzleModel nozzle
+TransitionConfig cfg
+
+输出：
+TransitionPath path
+TransitionStatus status
+```
+
+验收：
+
+```text
+synthetic two-island layer:
+    A→B transition generated
+    wire_off
+    no blending
+    collision proxy pass
+
+synthetic blocked case:
+    first z_safe fails
+    retry higher z_safe succeeds
+
+unavoidable blocked case:
+    status = TRANSITION_FAIL
+    KRL 不导出假连接
+```
+
+## 新模块 2：CollisionProxyValidator
+
+```text
+文件：
+src/collision/CollisionProxyValidator.cpp
+src/collision/CapsuleSampler.cpp
+src/collision/SignedDistanceQuery.cpp
+```
+
+验收：
+
+```text
+capsule far from mesh -> OK
+capsule intersect mesh -> COLLISION_FAIL
+capsule near mesh within margin -> CLEARANCE_RISK
+```
+
+## 新模块 3：PlanarBaseline
+
+```text
+文件：
+src/baseline/PlanarSlicer.cpp
+scripts/run_planar_baseline.py
+```
+
+验收：
+
+```text
+bunny planar layers generated
+same metrics schema as curved_slicer
+same IK/FCL validation pipeline
+```
+
+## 新模块 4：RegularizationReport
+
+```text
+文件：
+src/geometry/RegularizationMetrics.cpp
+```
+
+输出：
+
+```text
+hausdorff_p95
+hausdorff_max
+normal_deviation_mean
+normal_deviation_p95
+volume_change
+silhouette_iou_front
+silhouette_iou_side
+```
+
+验收：
+
+```text
+mao_original vs mao_regularized 报告能落盘
+论文图能直接用
+```
+
+---
+
+# 最终建议
+
+你现在可以把 v6 改成 v6.1：
+
+```text
+1. mao_regularized 不是 stress test，而是 heavy-regularized feasible benchmark。
+2. original mao 只用于显示 regularization loss。
+3. FCL 不设为硬依赖；SDF/capsule proxy 是主线。
+4. KRL OK segments 必须通过 TransitionPlanner 连接。
+5. planar baseline 自己写，v4 PDE 只做 qualitative failure。
+6. Wang/Li/Jayakody 不复现，只做 related-work capability table。
+```
+
+这套范围比原来的“mao 原始强凹全 OK”现实得多，也比“mao 只是失败热力图”更有论文展示价值。关键是别再声称“保留 mao 识别度”；你现在的叙事应是：
+
+> **复杂强凹模型经过可制造性正则化后可进入完整机器人 dry-run；代价是几何细节损失，并被量化报告。**
+
+[1]: https://github.com/flexible-collision-library/fcl?utm_source=chatgpt.com "flexible-collision-library/fcl"
+[2]: https://vcpkg.io/en/package/fcl.html?utm_source=chatgpt.com "fcl - vcpkg package"
+[3]: https://devblogs.microsoft.com/cppblog/vcpkg-is-now-included-with-visual-studio/?utm_source=chatgpt.com "vcpkg is Now Included with Visual Studio - C++ Team Blog"
+[4]: https://index.ros.org/p/fcl/?utm_source=chatgpt.com "fcl - ROS Package Overview"
+[5]: https://libigl.github.io/dox/signed__distance_8h.html?utm_source=chatgpt.com "include/igl/signed_distance.h File Reference"
+[6]: https://libigl.github.io/tutorial/?utm_source=chatgpt.com "Tutorial"
+[7]: https://github.com/ultimaker/curaengine?utm_source=chatgpt.com "Ultimaker/CuraEngine: Powerful, fast and robust engine for ..."

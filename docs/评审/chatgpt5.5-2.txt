@@ -1,0 +1,711 @@
+## 结论先行
+
+**v5 仍然不适合作为 7 周内“bunny + armadillo + mao + KR4 + RSI + 实机”的完整毕业主线。**
+它比 v4 更诚实，但又引入了一个新根本问题：
+
+> **你把“制造可行性”错误地降维成了“拓扑复杂度路由问题”。**
+
+Reeb graph、genus、bifurcation degree 只能描述几何/拓扑结构的一部分，不能可靠判断喷头 clearance、机器人可达性、IK 连续性、同层碰撞、路径连续性和材料粘结。你现在的 Stage 2 用 `g` 和 `b` 决定走 3a 还是 3b，这个判据太弱；一个 `g=0, b=0` 的深杯形凹腔就能让 Stage 3a 失败，一个 `g=1` 但几何很简单的 torus 又会被过度分区。你在 v5 中明确把 routing 规则写成 `g=0,b≤1 → 3a；g=0,b>1 → 3a + variable nozzle；g>0 或 b 很高 → 3b`，这正是会被反例击穿的地方。
+
+**7 周内最现实的目标**不是完整 v5，而是：
+
+> **做一个稳定曲面切片 pipeline：geometry conditioning + scalar-field / weighted-distance curved slicing + 后验 IK / collision heatmap + 1 个模型实机低速演示。mao 只做 stress test，不承诺完整打印。**
+
+如果坚持 v5 全部内容，我的悲观估计是 **12–20 周**，而且还不保证 mao 实机成功。
+
+---
+
+# P0-1：Stage 2 路由决策不鲁棒
+
+**判定：不成立。**
+
+你的 `g, b, critical points` 只能作为诊断指标，不能作为主路由决策。Reeb graph 很有用，但它不是制造可行性的充分条件。
+
+## 具体缺陷
+
+第一，**`g=0, b≤1` 不代表可以 single-pass curved slicing。**
+反例：一个 smooth deep cup、眼窝、鼻孔、耳道、内凹 U 形沟槽，拓扑上都是 genus 0，bifurcation 也可以很低，但喷头半径 `r_n=10mm` 的圆柱可能完全塞不进去。你的 Stage 2 会把它送进 Stage 3a，但真正失败点是 clearance，不是 topology。
+
+第二，**`g>0` 不必然需要分区。**
+一个尺寸足够大、开口足够宽的 torus 或环形支架，可能可以用单一 scalar field 生成可接受曲面层。你现在的规则会把它强行送进 3b，增加接缝、顺序规划和 bonding 风险。
+
+第三，**Reeb graph 依赖标量函数。**
+你写的是沿 build direction 的高度函数做 Morse 分析，但高度函数的 critical points 会随模型姿态改变。mao 头雕旋转 20°，critical point 数量、branch 结构和 saddle 位置都可能变化。你不能把 `b` 当成模型固有复杂度。
+
+第四，**噪声和细节会污染 Reeb graph。**
+mao 头发褶皱有 `<1mm` 细节，如果不做 persistence simplification，Reeb graph 会产生大量伪 critical points；如果 smoothing 太强，拓扑图稳定了，但头雕识别度可能丢失。
+
+第五，**Jayakody 2024 已经把 Reeb graph / Morse 用在 collision-prone region 识别和 nozzle orientation optimization 上。** 你的“按 Reeb graph 路由 single-pass vs partition”的 claim 很容易被认为是 Jayakody 2024 + Lau 2023 partition planning 的工程组合，而不是新理论。Jayakody 2024 明确提出 topology-aware framework，用 Reeb graph / Morse 思想识别 global collision-inducing features，并优化 nozzle orientation vector field 以实现 collision-free、support-free curved layer MAAM；Lau 2023 也已经做 partition-based print sequence planning + adaptive slicing，通过迭代分区建立 collision-free print sequence。([科学直通车][1])
+
+## 修改建议
+
+Stage 2 不要输出硬路由：
+
+```text
+if g=0,b≤1 -> 3a
+else -> 3b
+```
+
+改成打分制：
+
+```text
+score_single = w1 * clearance_score
+             + w2 * ik_continuity_score
+             + w3 * scalar_field_quality
+             + w4 * layer_component_penalty
+             + w5 * reeb_complexity_score
+
+if score_single ≥ threshold:
+    use single-pass
+else:
+    use partition
+```
+
+其中最重要的不是 `g`，而是：
+
+```text
+minimum nozzle clearance
+IK success rate
+IK branch continuity
+expected collision-prone region area
+field monotonicity violation
+layer fragmentation ratio
+```
+
+Reeb graph 只做辅助，不做唯一判据。
+
+---
+
+# P0-2：Stage 1 geometry conditioning 实际可行性
+
+**判定：部分成立，但当前写法非常危险。**
+
+你说 Stage 1 用主曲率标记高曲率区域，然后 local Laplacian smoothing + feature preservation + 薄壁 dilation，输出 manufacturable approximation。这条路线可以作为工程预处理，但不能写得太轻。
+
+## 具体缺陷
+
+第一，**`r_n=10mm` 是喷头本体 clearance，不是模型曲率的直接上限。**
+“喷头打不出 `<5mm` 半径凹陷”这个说法太粗。FDM 的 bead width、喷嘴孔径、喷头外壳半径、路径方向、局部开口宽度是不同概念。一个表面细节曲率半径小，不一定喷头撞；一个低曲率深凹腔，反而可能撞。
+
+第二，**高曲率 smoothing 会消灭语义特征。**
+mao 头发、眉毛、鼻翼、嘴唇、耳廓都可能被判为 high-curvature。你 smoothing 后“可打印”了，但可能已经不像 mao。论文必须报告：
+
+```text
+Hausdorff distance
+normal deviation
+curvature histogram before/after
+silhouette error
+feature retention score
+```
+
+否则审稿人会说你不是解决切片，而是把难模型改成了容易模型。
+
+第三，**local Laplacian smoothing with feature preservation 不是 200 LOC / 2 天。**
+真正稳定版本要处理边界、尖锐特征、非流形、三角形翻转、自交、薄壁 dilation 后的布尔修复、法向一致性、曲率重新估计。mao 这种模型一 dilation，很容易在耳朵、头发沟槽、脖子交界处自交。
+
+第四，**“prior art 隐式假设输入合法，没人专门做这步”这个 claim 不成立。**
+AM 里把输入形状变成更可制造的形状早就有，例如 Hu/Jin/Wang 2015 的 support slimming 就把模型变形成更 self-supported 的中间模型，并显式最小化形状变化；这和你说的 manufacturable approximation 很接近。([科学直通车][2])
+
+## 修改建议
+
+把 Stage 1 改成低风险、可量化版本：
+
+```text
+Stage 1 = optional printability-aware simplification
+```
+
+不要说“把不可打印特征转成可打印近似”这么强。写成：
+
+```text
+We apply bounded shape regularization under a user-defined geometric tolerance.
+```
+
+硬约束：
+
+```text
+Hausdorff(M, M') ≤ δ_H
+normal deviation ≤ δ_N
+volume change ≤ δ_V
+```
+
+建议毕业版参数：
+
+```text
+δ_H = 0.5~1.0 mm
+不要按 r_n=10mm 直接抹平所有高曲率
+只去除 < bead_width 的噪声细节
+mao 不做重度 smoothing，只做 decimation + small-feature suppression
+```
+
+---
+
+# P0-3：Stage 3a 本身还有数学漏洞
+
+**判定：当前描述不完整，甚至有错误。**
+
+你写 Stage 3a 是 heat geodesic distance `d(v)`，`H=∇d`，RBF 权重调制，然后解 Poisson `∇²φ = ∇·H_weighted`，并声称 `φ` monotonic along build direction。这里有三个硬伤。
+
+## 具体缺陷
+
+第一，**surface geodesic field 不是 volume slicing field。**
+Heat geodesic distance 通常在表面 mesh 上定义。你要切的是实体体积，需要 `φ(x)` 在 volume / voxel / tetrahedral domain 上有定义。否则 Marching Cubes 提取 volume iso-surface 没有稳定输入。你必须说明：
+
+```text
+是在 surface mesh 上切 shell？
+还是在 tetrahedral volume 上切 solid？
+还是在 voxel grid 上解 scalar field？
+```
+
+这三者完全不同。
+
+第二，**RBF scalar weight 只改 magnitude，不改 direction。**
+你写：
+
+```text
+H_weighted(v) = H(v) · Σω_i φ(||v-c_i||)
+```
+
+这是标量乘法。它不能真正优化 nozzle vector 朝 outward，也不能显著改变 collision-prone region 的方向场结构。Jayakody 2023 的 RBF field 是用来修改 fabrication sequence field，目标是降低 collision-inducing layer features 并做 adaptive layer thickness；不是简单乘一个 scalar weight 就能等价复现。([MDPI][3])
+
+第三，**Poisson 不保证 monotonicity。**
+`∇²φ = ∇·H` 得到的是最小二乘意义上的梯度投影，不保证 `φ` 沿 build direction 或支撑方向严格单调。除非你加 inequality constraints，例如：
+
+```text
+φ(v_j) - φ(v_i) ≥ ε    for directed support edges i -> j
+```
+
+否则 local extrema、folding、layer merging 仍然可能出现。你在 v4 已经接受了“PDE 后平滑不能 claim 拓扑等价”的问题，v5 这里不能换成“monotonic increasing”继续强 claim。
+
+## 修改建议
+
+毕业版不要复现完整 Jayakody 2024。改成更稳的：
+
+```text
+voxel/tet domain 上的 weighted shortest-distance scalar field
+```
+
+即：
+
+```text
+D(v) = shortest weighted distance from bottom/source region
+w(u,v) = length(u,v) * [1 + α orientation_penalty + β clearance_penalty]
+```
+
+然后：
+
+```text
+iso-surfaces of D -> curved layers
+```
+
+这个比 Poisson/RBF/orientation optimization 稳得多，也更适合 7 周。
+
+---
+
+# P0-4：Stage 3b 分区和 inter-partition interface 是 v5 最大工程坑
+
+**判定：当前不可行。**
+
+你写 mao 自动分 4 块：颈 / 脸 / 后脑勺 / 头顶；每块独立 Stage 3a；分区间做 collision-free topological sort；接口用 shared seam layer with weak bonding。这段是 v5 里最危险的部分。
+
+## 具体缺陷
+
+第一，**Reeb critical points 不等于可打印切割面。**
+critical point 附近可能正是几何最复杂、喷头最难接近、表面最显眼的位置。用它们确定切割平面，不保证 seam 可隐藏、不保证 seam 可粘、不保证路径可连续。
+
+第二，**每块 Stage 3a 可行，不代表整体可行。**
+分区后每块的 local scalar field 可以好看，但拼回去时会出现：
+
+```text
+layer phase mismatch
+seam gap / overlap
+不同 partition 的 layer thickness 不一致
+局部法向突变
+打印顺序导致后续喷头被前块挡住
+```
+
+第三，**topological sort 需要先有 pairwise blocking relation，而这个 relation 不是拓扑给的。**
+你说“后打印的 partition 必须不阻挡先打印 partition 的可达性”，但这需要对每个 partition、每条路径、每个姿态做 swept-volume reachability check。不是 Reeb graph 上排个序就完了。
+
+第四，**weak bonding 不能作为论文接口方案。**
+FDM inter-partition seam 如果只是“共享接缝层”，很容易成为强度最弱处。即使你不做力学论文，审稿人也会问 seam 是否开裂、是否有 void、是否影响表面。
+
+## 修改建议
+
+不要让 3b 成为毕业主线。保留为“manual assisted partitioning for stress test”。
+
+接口处理必须具体化成以下之一：
+
+```text
+方案 A：overlap band
+每个 partition 在 seam 两侧扩展 1~2 bead_width，交错打印，形成重叠熔接带。
+
+方案 B：scarf joint
+切割面不要垂直切，做斜接缝，增大接触面积。
+
+方案 C：interleaved seam curves
+每隔 n 层让路径跨 seam 一次，避免整条弱界面。
+
+方案 D：只做几何切片，不宣称 seam 强度
+mao 作为 visualization/stress test，不做实机完整打印。
+```
+
+论文里必须报告：
+
+```text
+seam gap
+seam overlap
+interface area
+跨 seam 路径比例
+seam 处 collision failure rate
+```
+
+---
+
+# P0-5：7 周交付评估
+
+**判定：完整 v5 不现实。**
+
+你当前目标是输出 `trajectory.csv`、每 4ms 一帧 6 关节角、KRL `.src/.dat`，并跑通 bunny、armadillo、mao 三模型。v5 又包含 geometry conditioning、Reeb graph routing、Jayakody-like single-pass、partition、KR4 IK DP、trajectory smoothing、swept collision、RSI XML 发包 。这个范围太大。
+
+## 悲观工期
+
+我会按下面估：
+
+| 模块                                  |   你估计 |   我估计 |
+| ----------------------------------- | ----: | ----: |
+| Stage 1 robust conditioning         |   2 天 | 1–2 周 |
+| Reeb graph / TTK integration        |   3 天 | 1–2 周 |
+| Stage 3a Jayakody-like reproduction |   8 天 | 3–5 周 |
+| Stage 3b partition + seam           |   5 天 | 3–6 周 |
+| KR4 IK DP + trajectory              |   4 天 | 1–2 周 |
+| swept collision + debugging         |   5 天 | 1–3 周 |
+| KRL / RSI / real machine debugging  | 未充分计入 | 1–3 周 |
+| 三模型调参 + 图表 + 写论文                    | 未充分计入 | 2–4 周 |
+
+**完整 v5 总计：12–20 周。**
+
+7 周能做的是降级版：
+
+```text
+bunny：完整曲面层 + 路径 + IK + 低速仿真/实机
+armadillo：完整曲面层 + 路径 + IK 后验评估
+mao：geometry-conditioned curved layers + failure heatmap，不承诺完整轨迹
+```
+
+你的 v5 预期成功率写 bunny 90%+、armadillo 80%+、mao 65–75%。这个数字没有实验支撑，论文里不要写，计划里也不要依赖。
+
+---
+
+# P1-5：Reeb graph 用哪个库
+
+**建议：TTK。不要指望 libigl。**
+
+TTK 是最稳的选择，因为它本来就是做 topological data analysis 的，包含 contour tree、merge tree、Morse-Smale、persistence simplification 等工具；官方文档也明确 contour tree 模块包括 segmentation、topological simplification、persistence diagrams/curves 等。([topology-tool-kit.github.io][4])
+
+建议流程：
+
+```text
+第 1 周不要写 C++ Reeb graph。
+先用 ParaView + TTK 插件看 height scalar 的 contour tree / critical points。
+确认对 bunny / armadillo / mao 的分区是否稳定。
+稳定后再考虑 C++ 调 TTK。
+```
+
+不要用 `libigl::scalar_to_clean_field` 当 Reeb graph 实现。libigl 是很好的 geometry processing prototype 库，但不是完整 topological analysis pipeline。([libigl.github.io][5])
+
+毕业版甚至可以不实现完整 Reeb graph。你可以实现更简单的：
+
+```text
+height sweep connected component count
+component merge/split event detection
+persistence threshold filtering
+```
+
+这足够做 routing diagnostic。
+
+---
+
+# P1-6：swept collision 用 FCL 还是 Bullet
+
+**建议：FCL。不要在 4ms RSI cycle 内做 collision。**
+
+FCL 明确支持 collision detection、distance computation、tolerance verification、continuous collision detection；它更适合你这种“移动喷头圆柱/胶囊 vs 静态已打印 mesh”的几何查询。([GitHub][6])
+
+Bullet 是物理/刚体仿真库，也有 CCD，但你的任务不是刚体动力学，而是离线路径几何验证；Bullet 的优势不在这里。([pybullet.org][7])
+
+关键点：
+
+```text
+collision check 必须离线做。
+RSI 4ms 里只发已验证的关节修正 / 轨迹点。
+不要边打印边做 FCL CCD。
+```
+
+推荐实现：
+
+```text
+for each segment q_i -> q_{i+1}:
+    sample M intermediate poses, e.g. M=5~20
+    nozzle = capsule/cylinder mesh
+    query distance(nozzle, printed_part_BVH)
+    require min_distance > safety_margin
+```
+
+先用 capsule 近似，比 cylinder mesh 稳。最终论文可以说 cylinder mesh 做 final validation。
+
+---
+
+# P1-7：IK branch DP 具体化
+
+**判定：你的 O(8²N) 思路成立，但还不够。**
+
+如果只有 8 个 IK branch，Viterbi / DP 是对的。状态：
+
+```text
+state(i, b) = 第 i 个路径点选择第 b 个 IK 解
+```
+
+转移：
+
+```text
+cost(i-1,a -> i,b) =
+    wq * ||wrap(q_i^b - q_{i-1}^a)||²
+  + wv * velocity_penalty
+  + ws * singularity_penalty
+  + wc * collision_penalty
+```
+
+硬约束：
+
+```text
+q_i^b inside joint limits
+σ_min(J(q_i^b)) ≥ ε
+|wrap(q_i^b - q_{i-1}^a)| ≤ qdot_max * Δt
+collision_free(q_{i-1}^a -> q_i^b)
+```
+
+伪代码：
+
+```python
+S[i] = all_valid_IK_solutions(p[i], R[i])  # up to 8
+
+dp[0,b] = start_cost(q[0,b])
+
+for i in range(1, N):
+    for b in S[i]:
+        dp[i,b] = inf
+        for a in S[i-1]:
+            if violates_velocity(q[i,b], q[i-1,a]): continue
+            if violates_acceleration_if_available(i,a,b): continue
+            if swept_collision(q[i-1,a], q[i,b]): continue
+
+            c = dp[i-1,a] + transition_cost(a,b)
+            if c < dp[i,b]:
+                dp[i,b] = c
+                parent[i,b] = a
+
+best = argmin_b dp[N-1,b]
+backtrack(best)
+```
+
+但有四个补充：
+
+1. **闭合曲线要 cyclic DP。**
+   曲面层路径常是闭合 contour。你要保证 `q_N` 能回到 `q_0`，否则一圈结束出现腕部跳变。做法是枚举起始 branch，强制终点 branch 接近起点。
+
+2. **tool yaw 也要进状态。**
+   如果喷头绕切向/法向有自由角，不是 8 个 branch，而是：
+
+   ```text
+   state = IK_branch × yaw_sample
+   ```
+
+   例如 yaw 采 8 个角，状态就是 64 个，复杂度变成 `O(64²N)`，仍可接受，但要剪枝。
+
+3. **4ms 不应固定用于所有路径点。**
+   你应该先生成几何路径点，再按 joint velocity / acceleration 重新 time-parameterize。否则路径采样太密时速度很慢，太稀时违反加速度。
+
+4. **quintic smoothing 后要重新验证。**
+   DP 通过的是离散点，五次多项式插值后中间姿态可能碰撞或奇异。Stage 5 必须再做 dense validation。
+
+---
+
+# P2-8：Mitropoulou 2022、Fang 2020、Bhatt 2022、S³-Slicer 与 v5 的关系
+
+## Mitropoulou 2022
+
+它和你的 armadillo / bifurcation 叙事有关。Mitropoulou 的工作关注 robotic FDM 的 non-planar layered paths，尤其是 bifurcating single-shell forms；它不一定覆盖 solid volume curved slicing，但会削弱你“处理 bifurcation”的新颖性。([Sage Journals][8])
+
+论文里应该放在：
+
+```text
+architectural / shell-based robotic non-planar printing
+```
+
+不要把它作为直接 baseline，但要说明你的对象是 closed solid / volume slicing，而不是 single-shell bifurcating surface。
+
+## Fang 2020 Reinforced FDM
+
+它非常重要。Fang 2020 做 multi-axis filament alignment，目标是受力方向增强；它同样涉及 curved layers、toolpaths、governing field、fabrication setup orientation，并讨论 strength-aware / collision-free working surfaces。它会挑战你“scalar field + curved layers + robot toolpath pipeline”的新颖性。([mewangcl.github.io][9])
+
+放在：
+
+```text
+field-based multi-axis slicing for mechanical performance
+```
+
+## S³-Slicer
+
+这是必须引用的强 prior。S³-Slicer 明确是 general slicing framework for multi-axis 3D printing，同时考虑 support-free、strength reinforcement、surface quality 多目标。你的 v5 contributions 不能写成“首次把多个制造目标合在一起”。([ACM Digital Library][10])
+
+## Bhatt 2022
+
+我没有从公开检索中可靠定位到你指的具体 “Bhatt 2022” 曲面切片论文。它可能更偏 robotic AM system / collaborative robotic printing / nonplanar construction printing，而不是你的核心 scalar-field slicer。没有准确题名时，不要把它放核心 baseline；可以放 related work 的 robotic AM implementation 段落。这个需要你补精确引用。
+
+---
+
+# P2-9：四个 contribution 哪个最容易被打
+
+你列的四个 contributions 是：topology-adaptive routing、geometry conditioning、KR4 R600 全栈实现、三模型验证 + 实机打印。
+
+## 最容易被打：Topology-adaptive routing
+
+因为 Jayakody 2024 已经是 topology-aware，且直接针对 collision-free / support-free curved layer MAAM；Lau 2023 已经是 partition-based print sequence + adaptive slicing。你的 routing 如果只是 `Reeb features -> choose algorithm`，新颖性不够。([科学直通车][1])
+
+## 第二容易被打：Geometry conditioning
+
+因为 AM shape optimization / support slimming / manufacturable approximation 不是新概念。Hu 2015 已经做 support slimming，让模型变成更 self-supported 的中间模型，并最小化形状变化。([科学直通车][2])
+
+## 最稳：KR4 R600 全栈实现
+
+这不是强算法贡献，但对 EI / 工程类 SCI Q4 最稳。前提是你真的能给出：
+
+```text
+IK branch DP
+trajectory.csv
+KRL output
+RSI streaming
+real robot dry run
+至少 1 个小模型实机打印
+```
+
+## 验证不是 contribution
+
+“三模型验证 + 实机打印”只能支撑论文，不是新贡献。它的价值取决于实验质量。
+
+---
+
+# P2-10：如果不用 Jayakody 2024，我会怎么 redesign
+
+我会完全砍掉 v5 的 routing + Jayakody reproduction，做一个保毕业的 **Clearance-weighted scalar-field slicer**。
+
+## 新方案
+
+```text
+1. Mesh conditioning：只做 decimation / hole fix / small feature removal
+2. Voxel or tetrahedral volume domain
+3. Compute clearance field C(x)
+4. Compute weighted distance field D(x) from base
+5. Extract iso-surfaces D(x)=k*h
+6. Generate contour paths on each layer
+7. IK DP + collision post-check
+8. Report failure heatmaps
+```
+
+边权：
+
+```text
+w(u,v) =
+    ||u-v|| *
+    [1
+     + α * orientation_penalty(u,v)
+     + β * clearance_penalty(u,v)
+     + γ * curvature_penalty(u,v)]
+```
+
+其中：
+
+```text
+clearance_penalty = max(0, r_n + margin - C(v))²
+orientation_penalty = 1 - |dot(normalized(u-v), preferred_growth_direction)|
+```
+
+优点：
+
+```text
+比 Poisson 稳
+比 Reeb routing 简单
+能自然绕开低 clearance 区域
+可以解释为 shortest manufacturability distance field
+更容易 7 周出结果
+```
+
+论文 claim：
+
+> “A clearance-weighted scalar-field method for robust curved-layer generation, with robot-specific post-certification.”
+
+这比 “Topology-Adaptive Hybrid Jayakody+Wu+TTK+RSI” 小很多，但更可能毕业。
+
+---
+
+# v5 的 adversarial inputs
+
+## 反例 1：smooth deep cup
+
+```text
+genus = 0
+b = 0
+surface curvature low
+deep cavity opening width < 2*r_n
+```
+
+Stage 2 会选 3a，但喷头进不去。Stage 1 curvature smoothing 也不会修，因为曲率不高。失败原因是 clearance，不是 topology。
+
+## 反例 2：mao 头发纹理
+
+```text
+大量 <1mm high-curvature grooves
+整体 genus = 0
+局部语义特征重要
+```
+
+Stage 1 若 smoothing 强，mao 失去识别度；若 smoothing 弱，Stage 3b 仍被大量 critical points / collision-prone regions 淹没。
+
+## 反例 3：torus with large clearance
+
+```text
+genus = 1
+几何简单
+喷头 clearance 足够
+```
+
+Stage 2 强制送 3b，但 single-pass 可能足够。说明 `g>0 -> partition` 是过度保守。
+
+## 反例 4：two-lobe model with narrow neck
+
+```text
+两个球由窄颈连接
+g = 0
+b 可能很低
+```
+
+Stage 3a 可能生成层合并/分裂；Stage 3b 若切在 neck，接口强度很差。
+
+## 反例 5：closed-loop contour IK wrist flip
+
+几何层面完全合理，但某一圈路径绕过机器人 wrist singularity，8 解逐点存在，DP 找不到 cyclic continuous branch。说明 geometric slicing 成功不等于 KR4 trajectory 成功。
+
+---
+
+# 最终建议：7 周保毕业版本
+
+## 砍掉
+
+```text
+砍 Stage 3b 自动 Reeb partition
+砍 Jayakody 2024 完整复现
+砍 mao 完整实机打印承诺
+砍 RSI 4ms 在线规划
+砍 “首次 topology-adaptive routing” 强 claim
+```
+
+## 保留
+
+```text
+保留 geometry conditioning，但加 Hausdorff / volume / normal deviation bound
+保留 scalar-field curved slicing
+保留 IK DP 后验验证
+保留 FCL offline swept collision
+保留 bunny 实机或 dry-run
+保留 armadillo + mao 可视化和 failure heatmap
+```
+
+## 7 周目标
+
+### Week 1–2
+
+```text
+mesh repair
+voxel/tet domain
+weighted distance scalar field
+Marching Cubes layers
+bunny 出图
+```
+
+### Week 3
+
+```text
+layer post-processing
+path generation
+layer thickness / coverage / component metrics
+armadillo 出图
+```
+
+### Week 4
+
+```text
+IK 8-branch DP
+joint velocity constrained trajectory
+robot workspace heatmap
+```
+
+### Week 5
+
+```text
+FCL offline collision validation
+nozzle clearance heatmap
+fix path sampling and time parameterization
+```
+
+### Week 6
+
+```text
+KRL / trajectory.csv
+KR4 dry run
+bunny or simple rounded model low速打印
+```
+
+### Week 7
+
+```text
+mao stress test
+失败区域分析
+论文图表 + ablation
+```
+
+## 论文标题建议
+
+不要用：
+
+> Topology-Adaptive Curved-Layer Slicing for 6-Axis FDM with Real-Time RSI Control
+
+这个标题承诺太大。
+
+改成：
+
+> **Robot-Aware Curved-Layer Slicing with Clearance-Weighted Scalar Fields for Six-Axis FDM**
+
+或者更保守：
+
+> **A Practical Curved-Layer Slicing Pipeline for Six-Axis FDM: Scalar-Field Generation and Robot Feasibility Evaluation**
+
+---
+
+# 审稿式结论
+
+**v5 不能按当前形式投 SCI Q4 / EI。**
+原因不是没有想法，而是 scope 失控：Stage 1 是形状优化，Stage 2 是拓扑分析，Stage 3a 是 Jayakody 复现，Stage 3b 是分区与接缝规划，Stage 4/5 是机器人轨迹与实时控制。每一项都能单独成为一个项目。把它们合成 7 周 pipeline，最大概率是每个模块都半成品。
+
+**可投 EI / SCI Q4 的版本应该收缩成一个工程可跑通的 pipeline：曲面层生成 + 机器人后验验证 + 失败分析。**
+新颖性不要押在“首次 topology-adaptive routing”，而押在“KR4-specific practical implementation + clearance-aware scalar field + systematic failure maps”。这不华丽，但更可能毕业。
+
+[1]: https://www.sciencedirect.com/science/article/pii/S2214860424002938?utm_source=chatgpt.com "Topological awareness towards collision-free multi-axis ..."
+[2]: https://www.sciencedirect.com/science/article/abs/pii/S0010448515000263?utm_source=chatgpt.com "Support slimming for single material based additive ..."
+[3]: https://www.mdpi.com/2504-4494/7/1/9?utm_source=chatgpt.com "Convexity and Surface Quality Enhanced Curved Slicing ..."
+[4]: https://topology-tool-kit.github.io/doc/html/classttk_1_1ContourTree.html?utm_source=chatgpt.com "ttk::ContourTree Class Reference"
+[5]: https://libigl.github.io/tutorial/?utm_source=chatgpt.com "Tutorial"
+[6]: https://github.com/flexible-collision-library/fcl?utm_source=chatgpt.com "flexible-collision-library/fcl"
+[7]: https://pybullet.org/Bullet/BulletFull/index.html?utm_source=chatgpt.com "Bullet Collision Detection & Physics Library"
+[8]: https://journals.sagepub.com/doi/10.1089/3dp.2021.0023?utm_source=chatgpt.com "Nonplanar 3D Printing of Bifurcating Forms"
+[9]: https://mewangcl.github.io/pubs/SIGAsia2020ReinforcedFDM.pdf?utm_source=chatgpt.com "Reinforced FDM: Multi-Axis Filament Alignment with ..."
+[10]: https://dl.acm.org/doi/10.1145/3550454.3555516?utm_source=chatgpt.com "S3-Slicer: A General Slicing Framework for Multi-Axis 3D ..."

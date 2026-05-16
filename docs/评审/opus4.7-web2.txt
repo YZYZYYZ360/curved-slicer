@@ -1,0 +1,359 @@
+# v6.1 严格评审
+
+声明：作为前一轮评审的"打假者"，这一轮**不放水**。v6.1 修了很多东西，但仍有需要直面的问题。
+
+---
+
+## 开篇：v6.1 vs v1 的进步与残留病灶
+
+**实质性进步**（必须承认）：
+1. ✅ 撤回"拓扑等价"claim → 改为实验性质
+2. ✅ 撤回"首次"claim → 改为窄 claim（pointwise IK margin）
+3. ✅ C2 IK 检查从"逐 voxel 局部"升级为"路径级 Viterbi DP"（开篇缺陷 #1 修复）
+4. ✅ 引入 capability table 而非数值对比 → 避免与 Jayakody/Li 直接对位
+5. ✅ 引入 RegularizationReport 量化 mao 偏差 → 把"打不出来"转成"几何代价可报告"
+6. ✅ TransitionPlanner 6 keypoint + 4 级 fallback → 同层/跨层自碰撞有了处理框架
+7. ✅ Fallback 阶梯设计（L4/L3/L2）→ 工程风险可控
+
+**残留的根本性病灶**：
+
+### 病灶 A：Pass 3 的 IK 可达性场 **p_ik 严重低估了可达性失败的全局耦合**
+
+你的 p_ik(v) 是 "对每个体素，遍历 12 yaw × 8 branch，取最小 J_ik"。这是**该点的存在性可达**，不是**路径上的可达**。Viterbi DP 在 Stage 5 才检查路径连续性。
+
+问题：Stage 2 的 D_final 用 p_ik 作权重 → **生成的层会偏向"每个点单独可达"的区域** → 但单点可达不蕴含整层路径可达。最坏情况：
+- 一层内每个点 p_ik 都很低（看似很好）
+- 但相邻点的 best branch 总是不同（分支跳变频繁）
+- Stage 5 DP 发现整层无连续解 → 整层标 IK_FAIL
+
+**等价表述**：你只对约束的 0-阶（存在性）做了 field bias，对 1-阶（连续性）什么也没做。
+
+修复成本：在 p_ik 中加入**分支一致性项**——例如 p_ik_consistency(v) = 邻域内最优 branch 的"主导比例"，鼓励层穿过 branch 单一的区域。这是非平凡的实现，但 v6.1 没写。
+
+### 病灶 B：Pass 1 / Pass 4 用 **D_0_mm（毫米）作为 Marching Cubes 等值面源**，但权重 w 是无量纲缩放过的
+
+仔细看：
+```
+w(u,v) = ‖u-v‖ × [1 + α·p_clear + β·p_orient + γ·p_curv + δ·p_ik(v)]
+```
+
+`‖u-v‖` 单位 mm，但 `[1 + ...penalty...]` 是无量纲乘数。所以 D_final_mm 不是真实毫米距离，而是**"沿最短路径累计的、被罚项膨胀过的等效距离"**。
+
+然后你在 Stage 3 用 `D_final_mm = k × layer_height_mm` (1.2mm) 提取等值面。这意味着：
+- 在低惩罚区，1.2mm 对应真实约 1.2mm 几何距离
+- 在高惩罚区（penalty=5），1.2mm 对应真实约 0.24mm 几何距离 → 层薄得离谱
+- 反过来，要打满 1.2mm 真实层厚的高惩罚区域，需要 D_final 累积到 6mm → 该区域被跳过，层间断了
+
+**所以你的 layer_height_mm 在 D_final_mm 语境下不是物理层厚，是"加权距离层厚"。物理层厚在高惩罚区会显著偏薄**，导致 bead overlap、layer broken。
+
+这不是数学错误（Dijkstra 形式上没错），是**语义错误**：你给一个加权距离场起了 `_mm` 的名字，又用它直接当物理厚度切。要么：
+- (a) 在等值面提取前做**重距离化**（reinitialize to true Euclidean SDF in band），损失加权信息但层厚物理正确
+- (b) layer_height 也按 voxel 局部权重缩放：`layer_height_eff(v) = layer_height_mm × w_local(v)`，但这又导致层数依赖路径
+
+v6.1 没看到这个问题的处理。审稿人一旦盯上单位，会要求复现 "实际层厚 vs 名义层厚" 的散点图。
+
+### 病灶 C：M0 Planar-Z baseline **不公平**
+
+你在 M0 写 "自己实现 planar slicer，**同 IK DP + collision validation pipeline**"。听起来公平，实际不公平：
+
+- Planar-Z 切平面层，每层是平面切片 → 在凹腔上方必须有支撑
+- 你的 IK DP + collision validation 是设计来检查"无支撑曲面层"的
+- M0 在 mao 上必然大面积 collision fail / IK fail（因为悬空体素无前层支撑）
+- 这个对比的结论会是 "Planar-Z 在六轴 + 无支撑场景下崩了" → **废话**，本来就不为这个设计
+
+你需要的 baseline 是**和你算法目标场景一致**的方法。建议替换 M0：
+- M0' = **Wang 2018 风格的 ASN 贪婪**（你 v1 的 prior，工程量适中）
+- 或 M0' = **CurviSlicer (Etienne 2019)** 的复现（如果工程允许）
+
+否则 reviewer 1 会说："你的 baseline 是 strawman"。
+
+---
+
+下面按你的 v6.1 章节逐项评审：
+
+---
+
+## 1. 算法层面的细节缺陷
+
+### 1.1 Pass 2 工具姿态：tool_z = -∇D_0，**这不一定是物理合理的喷嘴方向**
+
+你写 `tool_z(v) = -normalize(∇D_0(v))`。逻辑是"喷嘴朝向距离场来源方向"。问题：
+
+- ∇D_0 是**加权距离场**梯度，不是几何梯度
+- 在惩罚剧烈变化的区域，∇D_0 主要反映惩罚梯度，与几何法线脱钩
+- 工具姿态偏离曲面法线 → 喷嘴侧壁刮到表面、bead 形状畸变
+
+你的 pitfall #1 提到了这个"鸡生蛋"，处理是"不迭代，δ 太大就降低"。**这是回避，不是解决**。
+
+**建议**：tool_z 用**几何法线**（来自 SDF 的 ∇SDF），而非 D_0 梯度。Pass 2 的 tool_z 估计应该独立于加权距离场。这只是一行代码改动。
+
+### 1.2 Pass 3 yaw 采样均匀分 12 等份的合理性
+
+12 个 yaw = 30° 间距。问题：
+
+- KR4 R600 在某些工作空间区域，腕奇异邻域 yaw 窗口宽度可能 < 30° → 全 12 个采样都落入或都落外
+- 30° 是凭直觉选的（圆周 360/12），没有 sensitivity analysis
+- "失败段 12 → 24" 也是凭直觉
+
+**建议**：至少在 Week 4 做一次 yaw 采样密度 vs IK 成功率的曲线，附录里挂这条曲线，比纯 magic number 强很多。
+
+### 1.3 IK J_ik 的权重 a, b, c **完全没定义**
+
+你写 `J_ik(q) = a·jl_penalty + b·sing_penalty + c·ws_penalty`。a/b/c 是什么？你的整套加权场 αβγδ 还在论文里要 ablation，J_ik 内部又埋了 3 个 magic weight。**这是嵌套黑盒**。
+
+而且 jl_penalty / sing_penalty / ws_penalty 量纲各异：
+- jl_penalty 通常用 (q - q_lim)² / range² 量纲化（无量纲）
+- sing_penalty 用 σ_min^{-1} 或 1/cond(J)（单位 rad⁻¹ 或无量纲）
+- ws_penalty 是 (‖p‖ - r_safe)² 量纲 mm²
+
+**这三个加起来没有物理意义**。需要至少：每项 normalize 到 [0,1]。
+
+### 1.4 Cyclic DP 的"枚举起点"复杂度
+
+"闭合曲线 cyclic DP（枚举起点）" → 复杂度从 O(K²N) 变 O(K³N) = 1728·N。在 mao 0.8mm voxel + 上千闭合等值线下，这个数字会很糟糕。
+
+而且更糟的是：**多数 cyclic 闭合的 DP 在起点选错时给出局部最优解**，不是全局最优。Bellman 算法在 cyclic 上需要展开 2N 长度 chain + 边界约束（参考 Bellman 经典处理），不是简单"枚举起点"。
+
+**建议**：要么用 fixed-point iteration（2 次 open DP），要么明确说"approximate cyclic DP"并报告 closure gap。
+
+### 1.5 Raster fallback 的 PCA 间距补偿
+
+`Δs = line_spacing × clamp(g_med, 0.5, 1.0)` 中 g_med 是什么？没定义。猜测是"测地距离梯度的中位数"或"局部展平度量"。**没定义的 magic factor 在论文里直接被 reviewer 揪出来**。
+
+而且 raster fallback **退化到平面切的本质**：你用 PCA 找主平面，然后做 plane-family intersection。在强曲面区域（armadillo 头部、mao 头顶）PCA 主平面方向不稳定，导致 raster line 不沿等高线，**变成弯曲面上的螺旋**，bead overlap 失控。
+
+### 1.6 Inter-layer support check 的判据
+
+"每层每点查 layer_{k-1} 最近距离 ≤ support_radius" — support_radius 是多少？没定义。
+
+ASN 是结构判据（拓扑邻接），support_radius 是距离判据（度量邻接）。**两者不等价**。你 Stage 3 用距离判据替代 Stage 2 应该保证的 ASN 判据 → 可能在 Pass 4 的 D_final 上提取出违反 C1 的层。
+
+后续 Stage 4 path generation 才发现 → 标 BROKEN_LAYER → KRL 不输出 → 该层被跳。**算法的"约束 bias"承诺在这里漏底**。
+
+**建议**：Stage 3 提取每层后立即做 ASN check（顶点级或体素级），不能依赖 distance proxy。
+
+---
+
+## 2. 实验与对照
+
+### 2.1 4 methods × 3 models = 12 runs **数量太少**
+
+按 SCI Q4 / EI 标准这是底线。如果 Week 10-11 出现任何异常，没有 buffer。
+
+更糟的是**消融的维度只有 δ**。审稿人会问：
+- "α=0 vs α=α*" 呢？（clearance 的贡献）
+- "β=0 vs β=β*" 呢？（orientation 的贡献）
+- "γ=0 vs γ=γ*" 呢？（curvature 的贡献）
+
+你的回答是"固定 αβγ 只 ablation δ"（pitfall #8）。这意味着 **α/β/γ 是"凭信仰"放进 field 的，不可证伪**。reviewer 一旦问"你怎么证明 β 不是 0 也行"，你没法回答。
+
+**建议**：至少 α/β/γ 各做一次 0 vs default 的对照（即 4 个变量 × 2 水平 = 16 runs，可以用 Plackett-Burman 减到 8 runs），加上 δ 的全扫，**总 runs 不超过 24**，但消融完整度大幅提升。
+
+### 2.2 mao_regularized 的"smoothing 强度参数"在 OPEN-1 留到 Week 10 决定
+
+意味着 **Week 11 全 matrix 跑之前**，你的 mao 模型还没定型。如果 Week 10 实测发现 95% pointwise IK pass 需要把 mao 抹到 "扁圆球"，那论文里展示的 mao 还能叫 mao 吗？
+
+更严重：**Reviewer 会问 "smoothing 强度是为了让算法看起来 work 而调的吗"**。这是 hyperparameter mining 的指控。
+
+**建议**：smoothing 强度独立于 algorithm performance 选择。例如：固定为"抹平 < r_n/2 = 5mm 细节"（你已写），且**不再为 95% IK pass 调整**。如果调整后的 mao_regularized 仍然 50% SHADOW，那就报告 50%，承认 limitation。
+
+### 2.3 bunny 实机打印的"成功"定义
+
+"低速实机打印一件"——什么叫"成功"？
+- 完整打印未中断？
+- 几何精度 ≤ Hausdorff 1mm？
+- 表面无明显瑕疵？
+
+OPEN-3、OPEN-4、OPEN-5（TCP 校准、r_n、平台坐标）都到 Week 10 决定。如果校准误差 > bead width，bunny 实机可能"打出来但拓扑变形"。论文里展示的"bunny 实物照"如果有明显瑕疵，**审稿人质疑算法可用性**。
+
+**建议**：定义 "physical print success criteria" 写入 Week 10 计划：例如 "Hausdorff distance to nominal STL ≤ 3mm AND no layer separation AND visible bead overlap ≥ 50%"。事先写死，不许事后调。
+
+---
+
+## 3. 工程与时间线
+
+### 3.1 Week 4 引入"v6 窄新意"（IK feasibility field），**Week 5-7 是连续高风险周**
+
+Week 4: p_ik field（新模块）
+Week 5: Geodesic + raster fallback（v4 复用 + 新代码）
+Week 6: IK DP（新代码，KR4 解析 IK 不是简单的）
+Week 7: Cyclic DP + Transition（**两个高难模块叠在一周**）
+
+Week 7 是最大瓶颈。Transition 6-keypoint + 4 级 fallback 单独写完都需要 5-7 天，你压在 cyclic DP 同一周。
+
+**建议**：把 Transition 推到 Week 8 前半（Week 8 当前是 collision，可让 collision 也推后），Week 7 专注 cyclic DP。
+
+### 3.2 Week 10 同时做 4 件事，**会爆**
+
+- 机器人 dry-run + TCP/base 校准（半实机操作，至少 2 天）
+- 小模型实机打印（至少 1 天 + fail 重试 1 天）
+- bunny full matrix（runtime 数小时到 1 天）
+- armadillo smoke matrix（runtime 数小时）
+
+如果实机阶段任何环节有问题（TCP 偏差大、料堵、温度不稳），Week 10 就垮了。垮了之后 Week 11 还要 mao stress test，Week 12 还要写论文。
+
+**建议**：Week 10 先做实机校准 + bunny 实机，**只做 bunny full matrix**（其他 matrix 推到 Week 11）。armadillo smoke 已经在 Week 7 dry-run 过了，Week 10 不需要再 smoke。
+
+### 3.3 "v4 复用 70% 代码"的承诺没经检验
+
+你列了复用表（§11 IK、§13 geodesic、§14 quintic 等）。但：
+- v4 的 IK 是为 PDE 切片设计的，输入是 (p, R)，单点输入；v6 要求一次返回 8 branches → **接口要重写**
+- v4 的 geodesic 是 mesh 顶点距离场；v6 要求 component-level fallback → **逻辑要加新分支**
+- v4 的 quintic 是单段路径；v6 要求 transition 段 + KRL OK-only mode → **拼接逻辑新写**
+
+实际复用率估算：30-50%。"70%"是乐观估计，Week 1 写代码就会发现。
+
+**建议**：Week 1 增加 "interface audit"：列出 v4 每个模块的 API 实际与 v6 需求的 gap，量化重写工作量。
+
+### 3.4 缓存策略的细节
+
+"p_ik.vti 只按 model_transform + robot 算一次"。但如果 ablation 试 δ_min/δ_max 的不同 cap 值（pitfall #2 说要 cap），cap 是在 p_ik 计算时还是使用时 cap？如果是计算时，每次改 cap 都要重算 p_ik → 缓存失效。
+
+**建议**：cap 在 D_final 计算时做，p_ik 存 raw 值。
+
+---
+
+## 4. Schema 与可复现性
+
+### 4.1 traj_v1.0 schema 是**记录 schema** 而非**契约 schema**
+
+28 列 schema 是输出格式，但没有 **invariant check**：
+- frame_id 必须严格递增 1 每帧？
+- timestamp_ms = frame_id × 4 ms 严格成立？
+- status = OK 时 wire_on 必须 true？
+- transition_id 不为空时 motion_type 必须 RETRACT/TRAVEL/APPROACH？
+
+这些约束没写进 schema → 实际跑出来的 csv 可能有内部矛盾（OK 但 wire_off，会被审稿人发现）。
+
+**建议**：schema 文档增加 "Invariants" 章节，validate_schema.py 增加这些 check。
+
+### 4.2 diagnostic_v1.0 的 "geometry_regularization" 字段定义
+
+`hausdorff_p95`, `normal_dev_p95`, `silhouette_iou` 怎么计算？基于什么采样？
+- silhouette_iou 需要选投影方向（正面？侧面？俯视？）
+- normal_dev_p95 需要在哪些点采样
+
+如果论文里写 "silhouette IoU = 0.87"，审稿人问 "从哪个角度看" → 你没定义就尴尬。
+
+---
+
+## 5. 论文叙事
+
+### 5.1 标题 "Robot-Aware Curved-Layer Slicing with Clearance-Weighted Scalar Fields for Six-Axis FDM"
+
+可以。但有两个改进点：
+- "Clearance-Weighted" 在你算法里其实是 4 项加权（clearance + orientation + curvature + IK），不只 clearance。叫 "Manufacturability-Weighted" 更准确。
+- "Six-Axis FDM" 太泛，建议加 "KR4 R600 Case Study" 或 "with Industrial 6-Axis Robots"，明确范围。
+
+**建议**：`IK-Aware Manufacturability-Weighted Scalar Fields for Curved-Layer Slicing on Six-Axis FDM: A KR4 R600 Pipeline`
+
+### 5.2 Contribution 1 "IK-aware scalar field" 的窄 claim 是否真的窄到足够安全？
+
+你写："pointwise margin in scalar field, not path-level continuity proof"。这个窄是窄了，但**还有一个潜在攻击点**：
+
+- Reviewer 会问："pointwise IK margin 作为 field weight 真的有效吗？vs '后处理时筛掉不可行点' 有 statistically significant 差异吗？"
+- 如果 δ ablation 显示 δ=0 (M2) 和 δ=δ* (M3) 的 final printable coverage 差异 < 5%，**Contribution 1 实质失败**
+
+你的窄 claim 把贡献的 "novelty" 降到了一个**可被实验否证的窄假设**上。这是诚实的科学态度，但也意味着**实验结果必须支持这个窄 claim**。
+
+万一 δ ablation 显示 IK-margin 几乎无效呢？你的论文核心 contribution 就空了。
+
+**对冲建议**：Week 6 之前做一次 "fast and dirty" 的 δ effect smoke test（小模型 + 简化 IK 评估）。如果效果太弱，Week 7-8 还有时间调整论文叙事（例如把 Contribution 1 改为 "manufacturability-weighted scalar field for IK-feasible curved slicing"，把焦点从"IK-margin"转到"clearance + curvature + IK 联合 weighted"）。
+
+### 5.3 Capability table 的 "evaluated" 列
+
+```
+| Ours | ✓ | evaluated | evaluated | pointwise KR4 | ✓ |
+```
+
+"evaluated" 这个词在表里**很弱**。审稿人会理解为 "我们检查了但不保证"。建议改为更具体的措辞：
+- support-free: "evaluated, no separate support generation"
+- collision-aware: "validated by SDF + capsule swept volume"
+- IK-aware: "pointwise KR4 margin in field; path-level via Viterbi DP"
+
+### 5.4 Limitation 章节的措辞
+
+你列的 6 条 limitation 是诚实的。但"Algorithm bias only, not constraint guarantee" 这种写法**可能被审稿人攻击**："那你的算法到底保证什么？"
+
+**建议**：换成 positive framing：
+- ❌ "Algorithm bias only, not constraint guarantee"
+- ✅ "Constraint satisfaction is enforced by post-validation; the scalar field provides soft guidance to reduce failure rate, not hard guarantees. Failure regions are explicitly reported."
+
+---
+
+## 6. 仍未解决的根本问题（你应该自己也知道但要再次确认）
+
+### 6.1 同层自碰撞
+
+v6.1 的 collision validation 是 "vs printed BVH"。printed BVH 在层内打印过程中**动态增长**：第 k 层的第 i 个 bead 打完后，第 k 层的第 i+1 个 bead 的喷头要避开第 i 个 bead。
+
+你的 Stage 6 Level 2 "Capsule sampling vs printed BVH" 是基于 **previous layers BVH** 还是 **incrementally updated within layer BVH**？
+
+- 如果前者：同层自碰撞**漏检**
+- 如果后者：BVH 需要按 path point 递增 rebuild → 这是 expensive 操作，论文没提
+
+**Pitfall #5 说**："按 layer rebuild，不做 per-frame 增量"——所以**是漏检的**。
+
+这是开篇缺陷 #2 的残留。Stage 6 Level 3 "post-quintic dense validation" 也是基于 SDF + 关键帧 FCL，SDF 是 voxelized printed region（按层），同样不含同层增量。
+
+**结论**：v6.1 的 collision validation 在**同层内自碰撞**上是有 blind spot 的。
+
+**对策选项**：
+- (a) 接受这个 blind spot，在 limitation 明写 "intra-layer self-collision is not explicitly validated; relies on path planner avoiding immediate self-intersection"
+- (b) Stage 6 Level 2 改为 incrementally updated BVH（per-path-point append），工程量 +3 天
+- (c) Stage 4 path generation 阶段增加 "outward-spiraling" 约束，确保后续 bead 永远在已打印 bead 的外侧
+
+我推荐 (a) + (c) 组合。
+
+### 6.2 path-level IK 可达性 vs Pass 3 的 pointwise p_ik 的 gap（病灶 A 重申）
+
+Stage 2 用 p_ik(v) 作 field weight 引导层避开 IK 困难区，但 Stage 5 DP 才检查真实的路径连续性。如果在 Pass 3 没有"邻域分支一致性"指标，p_ik 引导出来的层在 Stage 5 仍可能整层 DP 失败。
+
+**你需要在 Pass 3 增加 branch_consistency 项**：
+```
+p_ik_v6.2(v) = min over (ψ, q) of J_ik
+              + λ_consist · branch_volatility(v)
+```
+其中 `branch_volatility(v)` = 在 v 的 1-邻域内，最优 branch 的"切换次数"或"主导比例"。
+
+这是 v6.2 应该加的，工程量约 1 天，但效果显著。
+
+---
+
+## 7. 评审结论与下一步建议
+
+### 总体判断
+
+v6.1 相比 v1 是**实质性进步**：
+- 学术诚实度大幅提升（撤回过强 claim）
+- 工程可行性大幅提升（fallback 阶梯、缓存策略、3 CLI 分离）
+- 论文叙事可立（窄 claim + capability table + 必报 limitations）
+
+但仍有 **3 个开篇病灶（A, B, C）** 和 **若干细节问题**。这些是否影响发表？
+
+- **Q4 / EI 标准下**：如果 v6.1 实施完成且实验数据支持 contribution 1，**可发**。审稿人不会盯着每个细节，关心 "novelty + reproducibility + experiments"。
+- **Q3 及以上**：需要修复病灶 A（p_ik 的 branch consistency）和病灶 B（D_final_mm 的单位语义），且 ablation 必须完整。
+
+### 优先级 Top 5 修改
+
+**P0（必须改，不改影响 Q4 发表）**：
+1. **病灶 C** baseline M0 替换为 Wang 2018 ASN 贪婪（避免 strawman 指控）
+2. **病灶 B** 在论文中**明确说明** D_final_mm 的语义——它是加权距离不是物理厚度，且在 Stage 3 之前做局部 layer_height 缩放，或附录里展示 "actual vs nominal layer thickness scatter"
+
+**P1（应该改，影响实验质量）**：
+3. **病灶 A** Pass 3 加 branch_consistency 项（v6.2）
+4. **Section 3.5** raster fallback 的 g_med 严格定义，magic factor 0.5/1.0 改为可解释参数
+5. **Pass 2** tool_z 改用 ∇SDF 而非 ∇D_0
+
+**P2（可选改，影响论文严谨度）**：
+6. yaw 采样密度的 sensitivity analysis（附录曲线）
+7. J_ik 内部 a/b/c 权重 normalize + 写入论文
+8. Schema invariant check（validate_schema.py 增强）
+
+### 一句话最终评价
+
+> v6.1 是从 "novel algorithm" 到 "engineered pipeline with quantified limitations" 的成熟转向。**核心算法贡献 narrow 但可立**，**工程贡献扎实但平淡**，**实验需要谨慎设计避免 strawman baseline 和 hyperparameter mining 指控**。按 12 周计划执行，Q4 大概率收，Q3 边缘冲刺。
+
+最大的剩余风险**不在算法**，**在 Week 10 的实机环节**。如果 bunny 实机失败回退到 dry-run only，论文的"实机验证"contribution 4 会显得空洞——纯算法论文 + 纯仿真验证在 Q4 也能发，但叙事要重写。
+
+建议 Week 8 末做一次 "physical print rehearsal"（用 KRL 输出在干跑模式控制机器人沿 bunny 轨迹运动 30 秒，无挤出），把 Week 10 实机失败的概率降下来。

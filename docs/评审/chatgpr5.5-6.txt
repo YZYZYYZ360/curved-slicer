@@ -1,0 +1,912 @@
+# Q8：12 个实验的实际跑时间，Week 12 够不够？
+
+**判定：Week 12 单独不够。必须从 Week 10–11 开始预跑。**
+
+你的估算 `12 runs × 30 min ≈ 6h` 是**理想无错版**。真实情况更接近：
+
+```text
+最终正式跑表：6–10 小时
+调参 / debug / 重跑：24–48 小时
+整理图表 / 修异常 case：1–2 天
+```
+
+所以 Week 12 不能承担“第一次跑完整矩阵”。Week 12 应该只做：
+
+```text
+final frozen run
+表格生成
+图生成
+论文写作
+异常解释
+```
+
+v6 本身已经把 Stage 6 定义为三层验证，尤其 Level 3 是 post-quintic dense validation，这一步本来就是慢路径；同时你自己列过 Pitfall 6 和 Pitfall 8：dense validation 会膨胀到 10k–100k 帧，权重调参也会扩大实验规模。 
+
+---
+
+## 推荐实验矩阵
+
+不要叫 “4 baselines × 3 models”。应叫：
+
+```text
+4 methods × 3 models
+```
+
+其中真正 baseline 是前三个，第四个是 proposed：
+
+```text
+M0: planar_z
+M1: dijkstra_geom
+    α=0, β=0, γ=0, δ=0
+    只用 bottom-source weighted distance / shortest distance
+
+M2: dijkstra_mfg_no_ik
+    α,β,γ enabled, δ=0
+    有 clearance/orientation/curvature bias，无 IK field
+
+M3: proposed_ik
+    α,β,γ enabled, δ=δ*
+    有 pointwise IK-aware scalar field
+```
+
+`v4 PDE` 不放进这个 12-run 主矩阵。它只做 qualitative failure comparison，否则 Week 12 会爆。
+
+---
+
+## 实验时间安排
+
+### Week 9 末
+
+开始跑：
+
+```text
+bunny: M0/M1/M2/M3 smoke run
+```
+
+目标不是出最终数据，而是确认：
+
+```text
+pipeline 不崩
+schema 正确
+report 能生成
+```
+
+### Week 10
+
+跑：
+
+```text
+bunny full matrix
+armadillo smoke matrix
+```
+
+同时锁定：
+
+```text
+model_transform
+voxel size
+line_spacing
+validation thresholds
+```
+
+不要再每个 method 单独调 placement。否则 baseline 不公平。
+
+### Week 11
+
+跑：
+
+```text
+armadillo full matrix
+mao_regularized smoke + full matrix 预跑
+```
+
+Week 11 结束前必须知道：
+
+```text
+mao_regularized 是否能 full OK
+哪一个 method/模型最慢
+哪几个 run 会失败
+```
+
+### Week 12
+
+只跑最终 frozen matrix：
+
+```bash
+python scripts/run_matrix.py \
+  --models bunny armadillo mao_regularized \
+  --methods planar_z dijkstra_geom dijkstra_mfg_no_ik proposed_ik \
+  --config configs/final_experiment.yaml \
+  --resume \
+  --cache \
+  --max-parallel 2 \
+  --out runs/final_matrix
+```
+
+`--max-parallel` 不要超过 2。并行太多会让 memory、BVH、SDF 查询、磁盘写入互相拖慢。
+
+---
+
+## 必须做 cache，否则时间会失控
+
+每个模型缓存：
+
+```text
+mesh_clean.ply
+mesh_regularized.ply
+voxel_grid.vti
+sdf.vti
+p_clear.vti
+p_curv.vti
+D0_mm.vti
+p_ik.vti
+```
+
+每个 method 重新生成：
+
+```text
+D_final_mm.vti
+layers/*.ply
+paths/*.polyline
+trajectory.csv
+validation_report.json
+diagnostic.json
+```
+
+关键优化：
+
+```text
+p_ik 只按 model_transform + robot + nozzle 计算一次。
+δ 不同只重跑 Dijkstra，不重算 p_ik。
+```
+
+否则 δ 消融会重复花 7 分钟算 IK field。
+
+---
+
+## Week 12 的实际工作量
+
+建议 Week 12 分配：
+
+```text
+Day 1:
+  final matrix 全部提交运行，晚上补跑失败项
+
+Day 2:
+  生成 metrics tables + plots
+
+Day 3:
+  检查异常 run，必要时重跑 2–3 个
+
+Day 4:
+  写实验章节 + failure analysis
+
+Day 5:
+  写 limitation + baseline discussion + 图表排版
+```
+
+如果 Week 12 Day 1 才第一次发现 `mao_regularized proposed_ik` collision 不过，就来不及。mao 必须 Week 11 已经跑过一次 full dry pipeline。
+
+---
+
+# Q9：raster fallback 的 plane spacing 怎么和 geodesic mode 保持一致？
+
+**判定：所有 mode 使用同一个 `line_spacing_mm` 作为目标间距。不要让每个 component 自由自适应。**
+
+你担心的是对的：如果 geodesic component 用 0.8 mm，raster component 自己根据 PCA 变成 0.5 或 1.2 mm，层内打印质量会不一致，实验指标也不可比。
+
+---
+
+## 推荐原则
+
+统一定义：
+
+```yaml
+path:
+  line_spacing_mm: 0.8
+  resample_step_mm: 0.2
+  spacing_policy: "constant_target_surface_spacing"
+```
+
+无论是 geodesic mode 还是 raster fallback，目标都是：
+
+```text
+target surface spacing = line_spacing_mm
+```
+
+v6 Stage 4 本来已经定义了 geodesic distance、等值线、stitching 和 0.2 mm 等步长重采样；raster fallback 应该只是失败替代，不应该改变路径间距定义。
+
+---
+
+## geodesic mode
+
+在 layer component 上算测地距离 `d_geo(p)`，取：
+
+```text
+d_geo(p) = i * line_spacing_mm
+```
+
+这很自然，因为 `d_geo` 本身是 surface distance。
+
+---
+
+## raster fallback mode
+
+对 component 做 PCA，得到 raster plane normal `e1`。定义：
+
+```text
+s(p) = dot(p, e1)
+```
+
+然后用一族平面：
+
+```text
+dot(x, e1) = s0 + i * Δs
+```
+
+切 layer mesh。
+
+问题是：`Δs = line_spacing_mm` 是**空间投影间距**，不一定等于曲面上的真实间距。曲面上真实间距近似为：
+
+```text
+surface_spacing ≈ Δs / ||Proj_T(e1)||
+```
+
+其中 `Proj_T(e1)` 是 `e1` 在曲面切平面上的投影。如果 `e1` 接近局部法向，`||Proj_T(e1)||` 很小，实际路径间距会变大，导致漏填。
+
+---
+
+## 实用方案
+
+对每个 component 计算：
+
+```text
+g(p) = ||Proj_Tp(e1)|| = sqrt(1 - dot(e1, n(p))^2)
+```
+
+然后取：
+
+```text
+g_med = median(g(p))
+g_p10 = percentile_10(g(p))
+```
+
+推荐：
+
+```text
+Δs = line_spacing_mm * clamp(g_med, 0.5, 1.0)
+```
+
+这不是“自由调间距”，而是把 plane spacing 转换成接近目标 surface spacing 的补偿。所有 component 的目标仍然是同一个：
+
+```text
+target_line_spacing_mm
+```
+
+只是平面间距为了实现这个目标做了几何补偿。
+
+---
+
+## fallback 判定
+
+对每个 component 先尝试 geodesic + stitching。通过以下条件则保留 geodesic：
+
+```text
+closed_loop_ratio >= 0.95
+open_endpoint_count <= 2
+max_endpoint_gap <= 1.5 * resample_step_mm
+coverage_gap_p95 <= 1.5 * line_spacing_mm
+self_intersection_count == 0 或低于阈值
+```
+
+否则该 component 走 raster fallback。
+
+注意：**按 component fallback，不按整层 fallback。**
+
+```text
+layer 17 component 0: geodesic
+layer 17 component 1: raster_fallback
+layer 17 component 2: skipped_small_component
+```
+
+---
+
+## raster fallback 通过标准
+
+raster 生成后也要评估实际 spacing：
+
+```text
+spacing_mean_mm
+spacing_p95_mm
+spacing_max_mm
+```
+
+接受条件：
+
+```text
+spacing_p95_mm <= 1.5 * line_spacing_mm
+spacing_max_mm <= 2.0 * line_spacing_mm
+```
+
+如果不通过：
+
+```text
+Fallback 1:
+  Δs *= 0.75
+
+Fallback 2:
+  component 按 normal clustering 分成 patch，再 raster
+
+Fallback 3:
+  标记 PATH_FAIL，不假装成功
+```
+
+毕业版可以不实现 normal clustering，但至少要有 Fallback 1 和 PATH_FAIL。
+
+---
+
+# Q10：`trajectory.csv` + `diagnostic.json` 具体 schema
+
+**判定：必须做 schema versioning。**
+否则 Week 10–12 会出现“脚本 A 写 status，脚本 B 读 state，KRL writer 又期待 flag”的混乱。
+
+v6 Stage 6 已经明确要输出 `trajectory.csv`、KRL、failure heatmap 和 `diagnostic.json`，并且 `trajectory.csv` 每段带 `OK/IK_FAIL/COLLISION_FAIL/SING_RISK/VEL_FAIL` 等状态。
+现在要把它冻结成 schema。
+
+---
+
+## 1. 文件组织
+
+建议每个 run 输出：
+
+```text
+runs/<model>/<method>/
+  config_resolved.yaml
+  trajectory.csv
+  trajectory_meta.json
+  diagnostic.json
+  validation_report.json
+  layer_metrics.csv
+  path_metrics.csv
+  failure_segments.csv
+  transition_segments.csv
+  artifacts/
+    D_final_mm.vti
+    layers/
+    paths/
+    failure_heatmap.ply
+```
+
+其中：
+
+```text
+trajectory.csv        # 每个 dense frame 或 keyframe
+trajectory_meta.json  # 坐标系、单位、schema、robot/nozzle 配置
+diagnostic.json       # run-level summary + nested metrics
+validation_report.json# collision/IK validator 的详细统计
+```
+
+不要把所有 per-frame collision details 都塞进 `diagnostic.json`，会太大。
+
+---
+
+## 2. `trajectory.csv` schema
+
+### 必需字段
+
+```csv
+schema_version,
+run_id,
+frame_id,
+timestamp_ms,
+dt_ms,
+layer_id,
+component_id,
+path_id,
+segment_id,
+transition_id,
+motion_type,
+status,
+wire_on,
+A1_deg,
+A2_deg,
+A3_deg,
+A4_deg,
+A5_deg,
+A6_deg,
+tcp_x_mm,
+tcp_y_mm,
+tcp_z_mm,
+tcp_rx_deg,
+tcp_ry_deg,
+tcp_rz_deg,
+ik_branch,
+yaw_id,
+source_type
+```
+
+### 建议字段
+
+```csv
+feed_mm_s,
+plc_mode,
+plc_speed,
+plc_ratio,
+sigma_min,
+joint_margin_min_deg,
+clearance_mm,
+validation_level,
+failure_code,
+comment
+```
+
+---
+
+## 字段解释
+
+```text
+schema_version:
+  固定字符串，例如 traj_v1.0
+
+run_id:
+  本次实验唯一 ID，例如 bunny_proposed_20260515_001
+
+frame_id:
+  从 0 开始的 dense trajectory frame index
+
+timestamp_ms:
+  轨迹时间。4ms dense validation 时应为 0,4,8,...
+
+dt_ms:
+  与上一帧时间差
+
+layer_id:
+  曲面层编号。transition 段仍保留来源 layer 或设为 -1
+
+component_id:
+  layer 内 component 编号
+
+path_id:
+  component 内 path 编号
+
+segment_id:
+  连续打印段编号
+
+transition_id:
+  非 transition 为 -1；retract/travel/approach 段为对应编号
+
+motion_type:
+  PRINT / RETRACT / TRAVEL / APPROACH / DWELL
+
+status:
+  OK / IK_FAIL / COLLISION_FAIL / SING_RISK / VEL_FAIL /
+  ACC_FAIL / PATH_FAIL / TRANSITION_FAIL / DISCONNECTED_OK /
+  BROKEN_LAYER / SKIPPED
+
+wire_on:
+  1 只允许出现在 motion_type=PRINT 且 status=OK 的帧
+
+A1_deg..A6_deg:
+  KUKA 关节角，单位 degree
+
+tcp_*:
+  TCP 位姿，单位 mm / degree。用于调试和 KRL 验证
+
+ik_branch:
+  0..7；无效时 -1
+
+yaw_id:
+  0..yaw_samples-1；无效时 -1
+
+source_type:
+  KEYPOINT / INTERP_QUINTIC / TRANSITION / VALIDATION_ONLY
+```
+
+---
+
+## 示例
+
+```csv
+schema_version,run_id,frame_id,timestamp_ms,dt_ms,layer_id,component_id,path_id,segment_id,transition_id,motion_type,status,wire_on,A1_deg,A2_deg,A3_deg,A4_deg,A5_deg,A6_deg,tcp_x_mm,tcp_y_mm,tcp_z_mm,tcp_rx_deg,tcp_ry_deg,tcp_rz_deg,ik_branch,yaw_id,feed_mm_s,plc_mode,plc_speed,plc_ratio,sigma_min,joint_margin_min_deg,clearance_mm,validation_level,failure_code,source_type
+traj_v1.0,bunny_proposed_001,0,0,0,0,0,0,0,-1,PRINT,OK,1,12.3,-45.1,61.2,10.0,35.2,-8.4,420.1,0.0,80.2,180.0,0.0,90.0,3,7,5.0,PRINT,5.0,1.0,0.032,18.5,6.2,L3,NONE,KEYPOINT
+traj_v1.0,bunny_proposed_001,1,4,4,0,0,0,0,-1,PRINT,OK,1,12.4,-45.0,61.1,10.2,35.1,-8.5,420.2,0.1,80.2,180.0,0.1,90.0,3,7,5.0,PRINT,5.0,1.0,0.031,18.4,6.1,L3,NONE,INTERP_QUINTIC
+```
+
+---
+
+## 3. `diagnostic.json` schema
+
+`diagnostic.json` 应该是 run-level summary，不存每一帧。
+
+### 顶层结构
+
+```json
+{
+  "schema_version": "diag_v1.0",
+  "run_id": "bunny_proposed_001",
+  "created_at": "2026-05-15T00:00:00-04:00",
+  "method_id": "proposed_ik",
+  "model_id": "bunny",
+  "input_mesh": "data/bunny.stl",
+  "regularized_mesh": "runs/bunny/proposed/artifacts/mesh_regularized.ply",
+  "git_commit": "unknown",
+
+  "config": {},
+  "artifacts": {},
+  "summary": {},
+  "geometry_regularization": {},
+  "field_metrics": {},
+  "layer_metrics_summary": {},
+  "path_metrics_summary": {},
+  "ik_metrics": {},
+  "collision_metrics": {},
+  "transition_metrics": {},
+  "height_sweep_diagnostic": {},
+  "failure_summary": {},
+  "per_layer": []
+}
+```
+
+---
+
+## `config`
+
+```json
+"config": {
+  "voxel_mm": 0.8,
+  "layer_height_mm": 1.2,
+  "line_spacing_mm": 0.8,
+  "resample_step_mm": 0.2,
+  "weights": {
+    "alpha_clearance": 1.0,
+    "beta_orientation": 0.3,
+    "gamma_curvature": 0.1,
+    "delta_ik": 0.5
+  },
+  "robot": {
+    "name": "KR4_R600",
+    "config_file": "configs/kr4_r600.yaml",
+    "yaw_samples": 12,
+    "top_k": 12
+  },
+  "nozzle": {
+    "radius_mm": 10.0,
+    "height_mm": 30.0,
+    "config_file": "configs/nozzle_fdm_10mm.yaml"
+  },
+  "model_transform": {
+    "scale": 1.0,
+    "rotation_rpy_deg": [0, 0, 0],
+    "translation_mm": [420, 0, 80]
+  }
+}
+```
+
+---
+
+## `artifacts`
+
+```json
+"artifacts": {
+  "trajectory_csv": "trajectory.csv",
+  "validation_report": "validation_report.json",
+  "layer_metrics_csv": "layer_metrics.csv",
+  "path_metrics_csv": "path_metrics.csv",
+  "failure_segments_csv": "failure_segments.csv",
+  "failure_heatmap_ply": "artifacts/failure_heatmap.ply",
+  "D_final_vti": "artifacts/D_final_mm.vti"
+}
+```
+
+---
+
+## `summary`
+
+```json
+"summary": {
+  "overall_status": "PASS",
+  "printable_segments": 128,
+  "failed_segments": 0,
+  "total_layers": 64,
+  "broken_layers": 0,
+  "total_paths": 312,
+  "path_fail_count": 0,
+  "trajectory_frames": 85420,
+  "ok_frame_ratio": 1.0,
+  "wire_on_frame_ratio": 0.82,
+  "runtime_sec": 1832.5
+}
+```
+
+---
+
+## `geometry_regularization`
+
+对 `mao_regularized` 很关键：
+
+```json
+"geometry_regularization": {
+  "enabled": true,
+  "source_model_id": "mao_original",
+  "regularized_model_id": "mao_regularized",
+  "hausdorff_mean_mm": 1.8,
+  "hausdorff_p95_mm": 4.6,
+  "hausdorff_max_mm": 8.9,
+  "normal_deviation_mean_deg": 8.2,
+  "normal_deviation_p95_deg": 27.0,
+  "volume_change_ratio": 0.06,
+  "silhouette_iou_front": 0.81,
+  "silhouette_iou_side": 0.84
+}
+```
+
+这里不要再用 `Hausdorff ≤ 0.5mm` 叙事。mao_regularized 是重度正则化模型，必须报告真实偏差。
+
+---
+
+## `field_metrics`
+
+```json
+"field_metrics": {
+  "field_unit": "mm",
+  "D_max_mm": 72.4,
+  "hard_infeasible_voxel_ratio": 0.0,
+  "high_penalty_voxel_ratio": 0.07,
+  "p_clear_mean": 0.12,
+  "p_curv_mean": 0.04,
+  "p_ik_mean": 0.31,
+  "field_deviation_from_D0_mean_mm": 0.8,
+  "field_deviation_from_D0_p95_mm": 2.4
+}
+```
+
+这能防止 `δ` 把层面扭曲太多但你没记录。
+
+---
+
+## `ik_metrics`
+
+```json
+"ik_metrics": {
+  "pointwise_ik_success_rate": 0.98,
+  "dp_success_rate": 1.0,
+  "cyclic_closure_success_rate": 0.96,
+  "min_sigma_min": 0.021,
+  "sigma_min_p05": 0.034,
+  "min_joint_margin_deg": 12.5,
+  "yaw_samples": 12,
+  "top_k": 12,
+  "adaptive_yaw_refinement_count": 4
+}
+```
+
+---
+
+## `collision_metrics`
+
+```json
+"collision_metrics": {
+  "validator": "sdf_capsule_proxy",
+  "level1_frames_checked": 85420,
+  "level2_frames_checked": 12044,
+  "level3_frames_checked": 85420,
+  "collision_fail_frames": 0,
+  "collision_fail_segments": 0,
+  "min_clearance_mm": 3.2,
+  "clearance_p05_mm": 5.8,
+  "runtime_sec": 420.1
+}
+```
+
+如果 FCL 没装通，`validator` 就写：
+
+```json
+"validator": "sdf_capsule_proxy"
+```
+
+不要伪装成 FCL。
+
+---
+
+## `transition_metrics`
+
+```json
+"transition_metrics": {
+  "transition_count": 22,
+  "transition_pass_count": 22,
+  "transition_fail_count": 0,
+  "max_retry_count": 2,
+  "min_transition_clearance_mm": 8.5,
+  "disconnected_ok_segments": 0
+}
+```
+
+---
+
+## `height_sweep_diagnostic`
+
+```json
+"height_sweep_diagnostic": {
+  "enabled": true,
+  "sample_count": 100,
+  "persistence_threshold_mm": 2.0,
+  "events": [
+    {
+      "event_id": 0,
+      "z_mm": 18.4,
+      "type": "split",
+      "component_count_before": 1,
+      "component_count_after": 2,
+      "associated_failure_count": 0
+    }
+  ]
+}
+```
+
+---
+
+## `failure_summary`
+
+```json
+"failure_summary": {
+  "by_status": {
+    "OK": 85420,
+    "IK_FAIL": 0,
+    "COLLISION_FAIL": 0,
+    "SING_RISK": 0,
+    "VEL_FAIL": 0,
+    "TRANSITION_FAIL": 0
+  },
+  "failure_regions": [
+    {
+      "failure_id": 0,
+      "status": "COLLISION_FAIL",
+      "layer_id": 31,
+      "component_id": 0,
+      "path_id": 4,
+      "frame_start": 34020,
+      "frame_end": 34212,
+      "bbox_min_mm": [410.2, -12.4, 95.1],
+      "bbox_max_mm": [418.7, -5.3, 99.4],
+      "min_clearance_mm": -1.2,
+      "note": "nozzle capsule intersects printed mesh"
+    }
+  ]
+}
+```
+
+---
+
+## `per_layer`
+
+只放 summary，不放所有点。
+
+```json
+"per_layer": [
+  {
+    "layer_id": 0,
+    "iso_mm": 1.2,
+    "area_mm2": 324.5,
+    "component_count": 1,
+    "largest_component_ratio": 1.0,
+    "broken": false,
+    "support_pass_rate": 0.98,
+    "path_count": 4,
+    "path_mode_counts": {
+      "GEODESIC": 4,
+      "RASTER_FALLBACK": 0
+    },
+    "ik_success_rate": 1.0,
+    "collision_fail_count": 0
+  }
+]
+```
+
+---
+
+# Schema versioning 规则
+
+必须有。
+
+建议：
+
+```text
+traj_v1.0
+diag_v1.0
+validation_v1.0
+```
+
+规则：
+
+```text
+v0.x:
+  Week 6–9 开发期，可以改字段
+
+v1.0:
+  Week 10 冻结
+  Week 11–12 所有 experiments 必须使用 v1.0
+```
+
+字段变更规则：
+
+```text
+添加 optional 字段：v1.1
+删除或改名字段：v2.0
+单位变化：v2.0
+status enum 变化：v1.1 或 v2.0，视是否破坏 reader
+```
+
+再加一个 schema 文件：
+
+```text
+schemas/trajectory_v1.md
+schemas/diagnostic_v1.schema.json
+schemas/validation_report_v1.schema.json
+```
+
+CLI #2 验收：
+
+```bash
+python scripts/validate_schema.py runs/bunny/proposed/diagnostic.json schemas/diagnostic_v1.schema.json
+python scripts/check_trajectory_csv.py runs/bunny/proposed/trajectory.csv
+```
+
+---
+
+# 对 CLI #2 的新增指令
+
+把这三项加入实施计划：
+
+## ExperimentRunner
+
+```text
+文件：
+scripts/run_matrix.py
+scripts/collect_metrics.py
+scripts/make_tables.py
+
+要求：
+- 支持 --resume
+- 支持 --cache
+- 支持 --max-parallel
+- 每个 run 写 run_status.json
+- 失败 run 不阻塞整个 matrix
+```
+
+## Raster spacing validator
+
+```text
+文件：
+src/path/RasterFallbackPath.cpp
+src/path/PathSpacingMetrics.cpp
+
+要求：
+- raster 使用 target_line_spacing_mm
+- 输出 spacing_mean/p95/max
+- component-level fallback
+- 超阈值标 PATH_FAIL
+```
+
+## Schema validator
+
+```text
+文件：
+schemas/trajectory_v1.md
+schemas/diagnostic_v1.schema.json
+scripts/check_trajectory_csv.py
+scripts/validate_schema.py
+
+要求：
+- Week 10 冻结 schema v1.0
+- 所有 final experiments 必须通过 schema check
+```
+
+---
+
+# 最终回答
+
+Q8：**Week 12 不够第一次跑 12 个实验。** Week 10–11 必须预跑，Week 12 只做 frozen final matrix、补跑、图表和论文。实际准备 24–48 小时用于重跑是合理的。
+
+Q9：**raster fallback 使用同一个 `line_spacing_mm` 作为目标 surface spacing。** Plane-family intersection 可以用 PCA，但 plane step 要按 `||Proj_T(e1)||` 做几何补偿；fallback 是 component-level，不是 whole-layer-level。
+
+Q10：**必须冻结 `trajectory.csv` 和 `diagnostic.json` schema。** `trajectory.csv` 记录 dense frame / keyframe 的 joint、TCP、status、wire、segment；`diagnostic.json` 记录 run-level summary、field/layer/path/IK/collision/transition/failure/height-sweep metrics。Week 10 冻结 `v1.0`，之后所有实验不再改字段。

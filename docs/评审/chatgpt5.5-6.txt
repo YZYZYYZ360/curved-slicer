@@ -1,0 +1,816 @@
+## 结论
+
+**v6.1 可以作为 CLI #2 的实施基线，但现在还不能“冻结”。**
+不是因为算法方向错，而是因为文档里还有几处会让执行者写错、让实验矩阵不可比、或让论文 claim 自相矛盾的地方。
+
+我建议你在交给 CLI #2 前做一次 **v6.1-patch**，重点改 10 个点。改完之后，这套 plan 才能进入工程执行。
+
+---
+
+# 一、P0 必须改：不改会影响实现或论文成立
+
+## P0-1：C1–C4 的措辞还残留“硬约束必须满足”的影子
+
+你文档里一方面写：
+
+> Scalar field is manufacturability-biased, not manufacturability-guaranteed.
+
+这是对的；但另一方面又写“四约束，任何曲面层算法必须满足”，并列出 C1 ASN、C2 IK、C3 喷头碰撞、C4 曲率干涉。这个表述仍然容易让人理解成：**边权生成的层天然满足 C1–C4**。你的方案实际是“soft bias + post validation”，不是 hard constraint solver。
+
+建议把标题从：
+
+```text
+四约束（任何曲面层算法必须满足）
+```
+
+改成：
+
+```text
+四类可制造性指标（用于 bias 与 post-validation）
+```
+
+并补一句：
+
+```text
+C1–C4 are not guaranteed by the scalar field. They are evaluated by post-validation; failed regions are either rejected, connected by wire-off transition, or reported.
+```
+
+否则审稿人会问：既然 C3 是硬约束，为什么还需要 collision fail ratio？既然 C2 是硬约束，为什么还需要 IK_FAIL？
+
+---
+
+## P0-2：penalty 的单位和尺度没有归一化，αβγδ 会失控
+
+现在边权写成：
+
+```text
+w = ||u-v|| × [1 + α·p_clear + β·p_orient + γ·p_curv + δ·p_ik]
+```
+
+但这些项的量纲完全不同：
+
+```text
+p_clear: mm² 或 cavity penalty
+p_orient: [0,1]
+p_curv: 1/mm²
+p_ik: 关节限位倒数 + σ_min 倒数 + workspace margin 倒数
+```
+
+这会导致一个问题：**δ 的数值没有物理意义，ablation 也不可解释。**
+比如 `p_ik` 若因为 `1/(σ_min+ε)` 爆到几百，δ=0.25 就可能压倒所有几何项；而 `p_curv` 可能非常小，γ 怎么调都没效果。
+
+必须在 Stage 2 加一个标准化层：
+
+```text
+p_i_raw(v)      # 原始 penalty
+p_i_clip(v) = winsorize(p_i_raw, p05, p95)
+p_i_norm(v) = clamp((p_i_clip - p05) / (p95 - p05 + eps), 0, 1)
+```
+
+最后边权只用：
+
+```text
+p_clear_norm, p_orient_norm, p_curv_norm, p_ik_norm
+```
+
+`diagnostic.json` 里要同时记录 raw 分布和 norm 分布：
+
+```json
+"penalty_stats": {
+  "p_ik_raw_p95": ...,
+  "p_ik_norm_mean": ...,
+  "p_curv_raw_p95": ...
+}
+```
+
+这件事必须进 plan，否则 Week 10 的 δ ablation 没有解释力。
+
+---
+
+## P0-3：`p_orient = 1 - |edge · build_direction|` 会把层面推回接近平面切片
+
+这个是当前算法里最大的“隐形数学问题”。
+
+你 Stage 2 的方向项写的是：
+
+```text
+p_orient(u,v) = 1 - |normalize(v-u) · build_direction|
+```
+
+这会鼓励 Dijkstra 距离场沿全局 build direction 增长。结果是：**β 越大，越像 Z 向平面切片**。它和“曲面层随模型形状弯曲”的目标有冲突。
+
+建议改成局部 preferred growth direction：
+
+```text
+B(v) = normalize((1 - η) * build_direction + η * N_smooth(v))
+p_orient(u,v) = 1 - |normalize(v-u) · B(v)|
+```
+
+其中：
+
+```text
+η = 0.2 ~ 0.5
+```
+
+这样 β 才是在“保持从底部推进”和“贴合局部形状”之间折中，而不是单纯把场拉回全局 Z。
+
+实验也要加一个小 ablation：
+
+```text
+η = 0, 0.3
+```
+
+不用放主表，但至少 internal smoke test。否则 proposed 可能跟 planar-Z 差异不大。
+
+---
+
+## P0-4：`cavity_radius(v)` 没有定义，CLI #2 无法实现
+
+你已经正确把 `p_clear` 降级成“cavity risk”，而不是真正喷头 clearance；但公式里用了：
+
+```text
+p_clear(v) = max(0, r_n + margin - cavity_radius(v))²
+```
+
+问题是：`cavity_radius(v)` 没定义。不同实现会完全不同。
+
+建议给 CLI #2 一个可实现的近似定义，不要追求完美：
+
+### 版本 A：局部开口风险，低成本
+
+对每个 surface-near voxel `v`：
+
+```text
+for directions d_i on sphere:
+    cast ray from v along d_i
+    measure first opposite-surface hit distance l_i
+cavity_radius(v) = percentile_20(l_i) / 2
+```
+
+这近似“喷头附近是否有狭窄开口”。
+
+### 版本 B：SDF/local feature size 近似，低实现风险
+
+```text
+cavity_radius(v) = abs(SDF_medial_like(v))
+```
+
+但这个会在真实表面附近很小，容易误判，需要只在 concave regions 上启用。
+
+我建议采用 A 的简化版，方向数先用 32 或 64。最终论文写成：
+
+```text
+local opening-radius proxy
+```
+
+不要叫 exact clearance。
+
+---
+
+## P0-5：Dijkstra 场没有平滑步骤，Marching Cubes 层会有网格锯齿
+
+你现在从 `D_final_mm` 直接 Marching Cubes。Dijkstra 图距离场是 piecewise graph metric，特别是在 26 邻域体素图上，会有明显方向量化。路径后面再怎么 smooth，也救不了层面锯齿。
+
+你之前砍掉 PDE 是对的，但不能完全不平滑。建议加入 **bounded field smoothing**：
+
+```text
+D_s = D_final
+repeat T=3~10:
+    D_tmp = edge-aware_laplacian(D_s)
+    D_s(v) = clamp(D_tmp(v), D_final(v)-ε, D_final(v)+ε)
+```
+
+推荐：
+
+```text
+ε = 0.25 * layer_height_mm ~ 0.5 * layer_height_mm
+```
+
+切片用：
+
+```text
+D_slice_mm = D_s
+```
+
+但保留：
+
+```text
+D_final_mm 原始场
+D_slice_mm 平滑后场
+field_deviation_from_Dfinal
+```
+
+论文写法：
+
+```text
+bounded scalar-field smoothing is used only to reduce voxel anisotropy; all manufacturability metrics are re-evaluated after layer extraction.
+```
+
+不加这一步，bunny/armadillo 的层面图可能会很难看。
+
+---
+
+## P0-6：printed state 的更新规则没有写清楚，C3 intra-layer 会被实现错
+
+你写了 C3 包含同层自碰撞，Stage 6 也有 printed BVH / capsule sampling，但没有定义 printed state 的更新时机。
+
+CLI #2 必须按下面规则实现：
+
+```text
+printed_state initially = platform or empty previous material
+
+for layer k:
+    for component c in scheduled order:
+        for path p in scheduled order:
+            validate nozzle(path p) against printed_state
+            if OK and wire_on:
+                add swept bead mesh of path p to printed_state
+            else:
+                do not add failed path
+        validate transition against printed_state
+```
+
+否则很容易出现两种错误：
+
+1. 只检查 previous layers，漏掉同层前面已经打印的材料。
+2. 直接拿 final mesh 当 obstacle，把本来还没打印的材料也当成障碍，误杀大量路径。
+
+这个规则必须写入 Stage 6。
+
+---
+
+## P0-7：KRL “仅 PRINT_OK” 与 transition 段导出逻辑矛盾
+
+你文档写：
+
+```text
+KRL .src/.dat（仅 PRINT_OK segments）
+```
+
+但 TransitionPlanner 生成的 RETRACT/TRAVEL/APPROACH 段不是 PRINT_OK，它们是 wire_off 的有效运动。如果 KRL 真的只导出 PRINT_OK，机器人无法从一个打印段移动到下一个打印段。
+
+改成：
+
+```text
+KRL exports connected executable blocks:
+    PRINT frames with status=OK and wire_on=1
+    VALID_TRANSITION frames with wire_on=0
+It never exports IK_FAIL / COLLISION_FAIL / TRANSITION_FAIL frames.
+```
+
+也就是说 status 枚举里最好新增：
+
+```text
+TRANSITION_OK
+```
+
+或者保持 status=OK，但用：
+
+```text
+motion_type = RETRACT / TRAVEL / APPROACH
+wire_on = 0
+```
+
+并在 KRL writer 里明确：
+
+```text
+export if status == OK and motion_type in {PRINT, RETRACT, TRAVEL, APPROACH}
+```
+
+不要写“仅 PRINT_OK”。
+
+---
+
+## P0-8：时间参数化和 DP 的 `Δt` 依赖关系要改清楚
+
+Stage 5 写：
+
+```text
+硬约束：|Δq| ≤ qdot_max·Δt
+Δt = max(d_cart/v_target, |Δq|_max/qdot_max)
+```
+
+这里有循环：DP 需要 `Δt` 判定转移是否可行，但 `Δt` 又依赖选出来的 `Δq`。
+
+推荐实现：
+
+### DP 阶段
+
+只用 Cartesian 预估时间：
+
+```text
+Δt_cart = d_cart / v_target
+```
+
+硬约束改成软一点：
+
+```text
+if |Δq| > qdot_max * Δt_cart * stretch_limit:
+    reject
+```
+
+其中：
+
+```text
+stretch_limit = 2~4
+```
+
+意思是允许后续 time parameterization 放慢速度。
+
+### time parameterization 阶段
+
+再正式计算：
+
+```text
+Δt_i = max(
+    d_cart_i / v_target,
+    max_j |Δq_j| / qdot_max_j,
+    sqrt(max_j |Δ²q_j| / qacc_max_j)
+)
+```
+
+否则 DP 会因为固定打印速度过早拒绝很多其实可以“慢一点通过”的转移。
+
+---
+
+## P0-9：五次多项式不能“每个路径点端点零速度”
+
+你计划中“5 次多项式插值到 4ms 周期”是对的，但不能在每个 polyline waypoint 都设零速度。那会导致机器人每 0.2mm 停一次，轨迹完全不可打印。
+
+正确做法：
+
+```text
+path start / path end:
+    v = 0
+
+intermediate waypoints:
+    velocity estimated by finite difference or chord-length parameterization
+    acceleration continuous if possible
+```
+
+如果时间不够，不要硬做完整 quintic。更稳的是：
+
+```text
+joint-space linear interpolation + velocity/acceleration smoothing filter + dense validation
+```
+
+论文里不需要强调 quintic 的高级性，重点是“time-parameterized and post-validated”。
+
+---
+
+## P0-10：mao_regularized “trajectory 全 OK”必须加 gate，不要直接写成默认目标
+
+文档里同时写了两个东西：
+
+* mao_regularized 是 L4 目标，trajectory 全 OK；
+* 最大风险是 mao_regularized full OK “可争取，不可保证”，有 L4/L3/L2 降级。 
+
+这不冲突，但要写成 gate：
+
+```text
+mao_regularized enters full dry-run only if:
+    pointwise IK success > 95%
+    layer broken ratio < 5%
+    path generation success > 95%
+    cavity high-risk voxel ratio < threshold
+    support pass rate > threshold
+```
+
+否则 CLI #2 可能会在一个明显不可行的 mao_regularized 上硬跑 DP/FCL，浪费一周。
+
+建议添加：
+
+```text
+If mao_regularized fails the preprocessing gate, increase regularization or report as L3 instead of attempting full trajectory OK.
+```
+
+---
+
+# 二、P1 重要修改：不改也能做，但会影响论文质量
+
+## P1-1：标题里的 “Clearance-Weighted” 有点不准
+
+你已经明确 `p_clear` 只是 cavity risk，不是真正喷头 clearance。真正 clearance 在 Stage 6 用 SDF/capsule proxy 验证。
+
+所以标题：
+
+```text
+Robot-Aware Curved-Layer Slicing with Clearance-Weighted Scalar Fields for Six-Axis FDM
+```
+
+可能会让审稿人误以为你的 scalar field 直接编码了真实 clearance。
+
+更稳的标题：
+
+```text
+Robot-Aware Curved-Layer Slicing with Manufacturability-Weighted Scalar Fields for Six-Axis FDM
+```
+
+或者：
+
+```text
+Robot-Aware Curved-Layer Slicing with IK- and Cavity-Biased Scalar Fields for Six-Axis FDM
+```
+
+如果你很想保留 clearance，就在论文里解释：
+
+```text
+clearance-weighted refers to a conservative cavity/opening-risk proxy, while final collision clearance is evaluated separately.
+```
+
+---
+
+## P1-2：Capability table 对 prior art 的列值要保守
+
+你现在 capability table 写 Wang 2018 / Li 2022 / Jayakody 2024 的 support-free、collision-aware、IK-aware field、robot dry-run。
+
+这张表可以保留，但不要用 `✓/✗` 表现得像你完全复现和验证过。建议改成：
+
+```text
+Reported focus / Not reported in KR4 setup / Evaluated in this work
+```
+
+例如：
+
+```text
+Robot-specific IK field:
+    Wang 2018: not reported
+    Li 2022: not KR4-specific
+    Jayakody 2024: orientation/collision focused, not KR4 IK field
+    Ours: pointwise KR4 IK margin
+```
+
+这样不会被抓“你怎么知道别人没有 robot dry-run”。
+
+---
+
+## P1-3：“Open-source 三模型 benchmark”不要写，除非真的开源
+
+Contributions 第 4 条写了：
+
+```text
+Open-source 三模型 benchmark
+```
+
+如果你最后没有公开代码、数据、配置、脚本，就不要写 open-source。
+
+改成：
+
+```text
+Three-model evaluation benchmark
+```
+
+如果最后真的开源，再改回去。
+
+---
+
+## P1-4：Planar-Z baseline 要保证同一套 validator，而不是只切片
+
+实验表里 Planar-Z 是最朴素 baseline，配置是“自己实现 planar slicer，同 IK DP + collision validation pipeline”。这个方向对。
+
+但要明确：
+
+```text
+Planar-Z uses the same:
+    model_transform
+    path spacing
+    IK DP
+    yaw sampling
+    collision validator
+    KRL exporter
+```
+
+否则它不是公平 baseline。
+
+---
+
+## P1-5：bunny/armadillo 0.5mm voxel 不要作为开发默认
+
+文档里 D5 写 bunny/armadillo 0.5mm，mao 0.8mm。
+
+开发阶段建议全部 0.8mm：
+
+```text
+Week 2–9:
+    all models 0.8mm
+
+Week 10–12 final:
+    bunny optionally 0.5mm
+    armadillo 0.8mm unless runtime allows
+    mao_regularized 0.8mm
+```
+
+否则 Week 2–6 的迭代速度会被拖死。
+
+---
+
+# 三、P2 小修改：执行细节建议
+
+## P2-1：schema 里加 `clearance_mm`、`feed_mm_s`、`validation_level`
+
+你现在 trajectory.csv 必需字段只有 28 列，缺少后续 debug 最常用的三类信息：速度、clearance、验证等级。
+
+建议把这些也作为必需字段，而不是 optional：
+
+```text
+feed_mm_s
+sigma_min
+joint_margin_min_deg
+clearance_mm
+validation_level
+failure_code
+```
+
+Week 10 之后数据一旦冻结，再加字段会很痛。
+
+---
+
+## P2-2：`status=OK` 太宽，要靠 `motion_type` 区分
+
+这可以接受，但 schema 文档里必须明确：
+
+```text
+status=OK, motion_type=PRINT, wire_on=1
+    means printable deposition frame
+
+status=OK, motion_type=TRAVEL/RETRACT/APPROACH, wire_on=0
+    means valid transition motion, not material deposition
+```
+
+否则 KRL writer 和统计脚本会混。
+
+---
+
+## P2-3：height-sweep diagnostic 不要在 Week 11 才第一次写
+
+计划把 Height-sweep 放 Week 11。
+建议提前到 Week 3–4 做一个最小版，因为它很容易和 failure heatmap 的 layer/component ID 对不上。最小版只需：
+
+```text
+input mesh
+sample z planes
+component_count(z)
+height_events.csv
+```
+
+Week 11 再做 overlay 图。
+
+---
+
+# 四、对 12 周计划的审查
+
+你的 12 周计划的主路径是合理的：Week 1 工程骨架，Week 2–4 scalar field，Week 5 path，Week 6–7 IK/transition，Week 8–9 validation/KRL/schema，Week 10–12 实机、矩阵、论文。
+
+但我建议做 5 个调整。
+
+## 调整 1：Week 2 增加 field unit test
+
+加验收：
+
+```text
+D0_mm must be in millimeters.
+D_norm must never be accepted by MarchingCubes.
+A test must fail if normalized field is used for slicing.
+```
+
+这是防止 `D_norm` 和 `D_mm` 混用。
+
+---
+
+## 调整 2：Week 3 加 penalty normalization
+
+Week 3 不只是 p_clear/p_curv，还要加：
+
+```text
+PenaltyNormalizer.cpp
+PenaltyStats.json
+```
+
+验收：
+
+```text
+all normalized penalties in [0,1]
+p95/p05 recorded
+edge weights finite, no NaN, no inf
+```
+
+---
+
+## 调整 3：Week 4 加 p_ik cache contract
+
+你已经设计了 cache 策略，尤其 p_ik 只按 model_transform + robot 算一次。
+Week 4 必须验收：
+
+```text
+same model_transform + same robot + same yaw_samples -> reuse p_ik.vti
+changing δ must not recompute p_ik
+changing model_transform must invalidate p_ik
+```
+
+否则 Week 10–12 实验矩阵会被重复计算拖死。
+
+---
+
+## 调整 4：Week 7 的 TransitionPlanner 必须输出 transition validation report
+
+不是只生成 transition 点。要输出：
+
+```text
+transition_segments.csv
+transition_metrics.json
+```
+
+字段至少：
+
+```text
+transition_id
+from_segment
+to_segment
+retry_count
+z_safe_mm
+status
+min_clearance_mm
+ik_success
+collision_success
+```
+
+---
+
+## 调整 5：Week 8 的 collision validator 必须先实现 printed_state
+
+不要先写 capsule sampler 后再想 printed BVH。顺序应该是：
+
+```text
+PrintedState
+NozzleModel
+CapsuleSampler
+SDFClearancePrefilter
+CollisionValidator
+```
+
+因为没有 PrintedState，就没法验证 intra-layer collision。
+
+---
+
+# 五、实验设计审查
+
+## 主矩阵 OK，但别把 δ ablation 和 12-run 主表混在一起
+
+你主矩阵是：
+
+```text
+M0 Planar-Z
+M1 Dijkstra-geom
+M2 Dijkstra-mfg
+M3 Proposed
+× bunny / armadillo / mao_regularized
+```
+
+这个可以作为 Table 1。
+
+但 Contributions 里又说必须 ablation：
+
+```text
+δ = 0 / 0.25 / 0.5 / 1.0
+```
+
+这会让实验数从 12 变成更多。
+
+建议拆成两层：
+
+### Main comparison
+
+```text
+4 methods × 3 models = 12 runs
+```
+
+### δ ablation
+
+只在 bunny + armadillo 上做：
+
+```text
+δ = 0, 0.25, 0.5, 1.0
+```
+
+mao_regularized 只做 selected δ*，不要做全 δ ablation。否则 Week 12 压力会爆。
+
+---
+
+## `KRL OK Length` 要换成比例
+
+表格里写：
+
+```text
+KRL OK Length
+```
+
+建议改成：
+
+```text
+KRL OK Ratio
+```
+
+定义：
+
+```text
+KRL_OK_ratio = executable_OK_path_length / total_required_path_length
+```
+
+同时保留绝对长度：
+
+```text
+KRL_OK_length_mm
+```
+
+只报长度会有误导：大模型天然长度长。
+
+---
+
+## `Coverage` 要说明是 geometry coverage 还是 printable coverage
+
+建议两个都报：
+
+```text
+layer_coverage_ratio:
+    MC layers cover model volume/surface extent
+
+printable_coverage_ratio:
+    wire_on OK path length / total path length
+```
+
+否则一个方法可以几何层覆盖很好，但 IK/collision 全失败。
+
+---
+
+# 六、论文叙事审查
+
+## 现在的四个 contribution 可以保留，但措辞再收紧
+
+你当前 contribution 写法已经比 v4/v5 安全很多：IK-aware scalar field 限定为 pointwise margin，full pipeline 是工程贡献，height-sweep 只做 diagnostic，不 claim topology routing。
+
+我建议最终写成：
+
+```text
+1. A manufacturability-weighted scalar-field formulation that injects a KR4-specific pointwise IK margin before curved-layer extraction.
+
+2. A practical six-axis FDM pipeline that combines curved-layer extraction, component-aware path generation, cyclic IK branch selection with yaw sampling, conservative collision validation, transition planning, and KRL-compatible export.
+
+3. A diagnostic framework that reports layer quality, IK feasibility, collision risk, transition failures, and height-sweep connectivity events.
+
+4. A three-model evaluation including a physical low-speed print and dry-run feasibility analysis on harder regularized geometries.
+```
+
+不要写：
+
+```text
+open-source
+support-free
+collision-free
+fully printable
+```
+
+除非结果真的支持。
+
+---
+
+# 七、最终给 CLI #2 的 patch list
+
+你可以把下面这段直接加到 plan 最前面，作为实施前强制要求。
+
+```text
+v6.1-patch before implementation:
+
+P0-1 Rename C1-C4 from hard constraints to manufacturability metrics.
+P0-2 Implement PenaltyNormalizer; all penalties used in edge weights must be normalized to [0,1].
+P0-3 Replace build-direction-only p_orient with blended preferred growth direction B(v).
+P0-4 Define cavity_radius/opening_radius proxy explicitly.
+P0-5 Add bounded smoothing for D_final_mm before Marching Cubes; save both D_final_mm and D_slice_mm.
+P0-6 Define PrintedState update order for previous layers and previous paths in the same layer.
+P0-7 KRL exports PRINT OK frames plus valid wire-off transition frames; not PRINT-only.
+P0-8 Clarify DP-time-parameterization dependency; DP uses provisional Δt, final timing can stretch.
+P0-9 Do not impose zero velocity at every waypoint; only at path boundaries.
+P0-10 Add mao_regularized preprocessing gate before full dry-run.
+```
+
+---
+
+# 最终判断
+
+**可以执行，但必须先打 v6.1-patch。**
+
+当前 plan 已经具备可交付结构：3 CLI、file-based 数据流、v4 模块复用、12 周计划、实验矩阵、schema、risk fallback 都写出来了。工程架构和 v4 复用映射是清楚的，尤其 §11 IK、§12 voxel/SDF、§13 geodesic path、§14 time/KRL 的复用路径已经明确。
+
+剩余风险不是“算法方向错”，而是：
+
+```text
+penalty 未归一化
+orientation bias 过于平面化
+cavity_radius 未定义
+Dijkstra 场缺平滑
+printed_state / transition / KRL 导出规则不够精确
+trajectory timing 容易实现错
+mao_regularized full OK 缺 gate
+```
+
+把这些改掉后，可以交给 CLI #2 开始 Week 1。
+不改的话，最大概率不是论文被拒，而是 **Week 6–9 代码跑起来后发现指标不可信、KRL 不连续、baseline 不公平、mao full OK 调不出来**。

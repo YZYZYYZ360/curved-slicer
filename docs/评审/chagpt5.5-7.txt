@@ -1,0 +1,354 @@
+下面按 8 个问题逐条给。先说明检索边界：我查到的是 **Xu 2019 / Li 2022 / Jayakody 2023/2024 / Fang 2020 / S³-Slicer / Zhang 2021 / Neural Slicer 2024 / INF-3DP 2025** 这条多轴曲面切片主线，以及机器人 IK solution selection / medial axis / local feature size 相关资料。**我没有找到完全等同于你 v6.2 中每个具体工程公式的直接 prior art**。所以回答里我会区分：
+
+* **已有思想**：文献中明确存在；
+* **近似思想**：文献中有类似范式，但不是同一公式；
+* **你们的工程设计**：我没找到直接对应，应谨慎 claim。
+
+你当前 v6.1/v6.2 的核心是：体素图 Dijkstra 加权距离场，先算 `D0`，由 `∇D0` 估 tool axis，再计算 `p_ik`，最后重新生成 `D_final`；你自己文档里也已经把 contribution 限定为 “KR4-specific pointwise IK margin injected into clearance-weighted distance field”，且明确不 claim “first IK-aware curved slicer”。 
+
+---
+
+# Q1：`B(v) = normalize((1-η)·build_dir + η·normal)` 有直接 prior art 吗？
+
+**结论：我没有找到这个具体线性融合公式在 curved layer slicing 文献中的直接对应。**
+
+已有 prior art 是“local printing direction / printing orientation vector field / nozzle orientation field”这类方向场思想。Li 2022 明确使用两个互相正交的单位向量场：filament orientation vector field 和 printing orientation vector field，并通过优化得到它们，再由 printing orientation field 生成单调 scalar distance field。S³-Slicer 也明确把 support-free、strength、surface quality 等目标表述为体内变化的 local printing directions，并通过 rotation-driven deformation / quaternion fields 得到 scalar field。Jayakody 2024 则是优化 nozzle orientation vector field 以避免 global collisions 并满足 overhang angle constraints。([科学直接][1])
+
+但这些文献里我没有看到你这个具体形式：
+
+```text
+B(v) = normalize((1 - η) build_dir + η normal(v))
+```
+
+它更像一个**工程型 convex blend / homotopy blend**：用 `build_dir` 保持全局推进，用 `normal` 增加形状贴合。不要把它 claim 成理论创新。安全写法是：
+
+> We use a simple convex blend between the global build direction and the smoothed local normal to define a preferred growth direction. This is an implementation-level choice inspired by prior direction-field-based curved slicing methods, where local printing directions or nozzle orientation fields are optimized or prescribed.
+
+不要写：
+
+> We propose a novel direction-field formulation.
+
+如果实验里 `η=0.3` 明显优于 `η=0`，可以说：
+
+> The blend parameter controls the trade-off between globally monotone growth and local shape conformity.
+
+这不会被抓。真正能 claim 的不是“线性融合公式新”，而是“我们用这个低成本 direction prior 给后面的 robot-aware field 提供稳定初值”。
+
+---
+
+# Q2：32 方向 ray casting + percentile_20/2 估 local opening radius 有直接 prior art 吗？
+
+**结论：我没有找到“32 rays + percentile_20/2”这个具体方法在 AM/collision 文献中的直接对应。它不是经典 medial axis 计算；它是一个 ray-sampling 的 local opening proxy。**
+
+它和 medial axis / local feature size / reach 有关系，但不是同一个东西。经典 local feature size 通常定义为表面点到 medial axis 的距离；Amenta/Bern 的 Voronoi filtering 论文定义 local feature size 为点到 medial axis 的欧氏距离。Federer 的 reach 也可以理解为集合到 medial axis 的最小距离，近年综述/论文也这样表述。([Department of Computer Science][2])
+
+你的方法：
+
+```text
+sample directions d_i
+ray cast
+take percentile_20(hit_distances) / 2
+```
+
+它测的是“局部多方向开口尺度”，不是“到 medial axis 的精确距离”。两者差别很大：
+
+* **local feature size / reach** 是几何上严格定义的距离尺度，通常与 medial axis 最近点有关；
+* **你的 opening radius proxy** 是方向采样下的局部可进入性启发式，受采样方向、percentile、ray hit 定义影响；
+* 对深杯形凹腔、薄槽、斜开口，它可以比 nearest SDF 更有用，但没有 classical reach 的理论保证。
+
+论文里建议叫：
+
+> **sampled local opening-radius proxy**
+
+或者：
+
+> **ray-sampled cavity-risk proxy**
+
+不要叫：
+
+> local feature size
+
+除非你明确写：
+
+> It is not the classical local feature size. It is a conservative, ray-sampled proxy inspired by medial-axis/local-feature-size notions.
+
+与 reach / local feature size 的关系可以这样写：
+
+> Classical local feature size measures the distance to the medial axis; our proxy does not compute the medial axis. Instead, it estimates local accessibility by sampling ray distances in multiple directions and using a lower percentile as a robust estimate of narrow openings.
+
+这样审稿人容易接受，因为你承认它是 proxy，不冒充严谨几何量。
+
+---
+
+# Q3：把 pointwise IK margin 注入 scalar field construction 阶段有没有 prior art？
+
+**结论：我没有找到“KR4 R600 + pointwise IK margin + Dijkstra edge weight / scalar field construction”这种直接 prior art。Fang 2020、S³-Slicer、Li 2022、Jayakody 2024 都涉及 field / direction / collision / manufacturability，但我没看到它们把特定 6R 机器人的 IK margin 作为 scalar-field 边权注入。**
+
+具体说：
+
+Fang 2020/Reinforced FDM 的项目描述是优化 governing field 和 fabrication setup orientation，从 governing field 的 iso-surfaces 提取 working surface layers，用于 strength-aware / collision-free working surfaces；这不是 KR4 这类 serial robot 的 pointwise IK margin field。([国信方][3])
+
+S³-Slicer 把多个 fabrication objectives 形式化成体内变化的 local printing directions，并通过 rotation-driven deformation / quaternion fields 生成 scalar field；它是 general slicing framework，但公开摘要里没有说把某个具体机器人解析 IK 的 joint-limit/singularity/workspace margin 注入 edge weights。([研究探索者 曼彻斯特大学][4])
+
+Li 2022 优化 filament orientation vector field 和 printing orientation vector field，同时考虑 support-free、collision-free、mechanical performance；它随后通过 Poisson/integration 得到 scalar distance field。它处理 nozzle orientation / collision / mechanics，不等同于 KR4 解析 IK margin。([科学直接][1])
+
+Jayakody 2024 明确做 topology-aware collision-free framework 和 nozzle orientation vector field optimization；它关注 global collision-inducing features、Reeb/Morse、overhang angle constraints，不是特定机器人 IK branch/margin field。([科学直接][5])
+
+2025 的 INF-3DP 更接近“统一 toolpath generation + global collision-free motion planning”，甚至 joint optimization over continuous quaternion field 和 differentiable global collision handling；但摘要中也没有显示“KR4-specific IK margin as Dijkstra scalar-field edge weight”。它会压缩你“general collision-free multi-axis pipeline”的激进 claim，但不直接覆盖你这个 KR4 点位 IK margin 边权。([arXiv][6])
+
+所以 Contribution 1 可以 claim 到这个范围：
+
+> 在曲面层生成前，将特定 6R 机器人模型的点位 IK 可行性指标，包括 joint-limit margin、singularity margin 和 workspace margin，作为制造性加权距离场的一项 penalty 注入标量场构造。
+
+最安全的边界：
+
+* 只 claim **pointwise IK margin**；
+* 不 claim path-level continuity；
+* 不 claim collision-free guarantee；
+* 不 claim first IK-aware curved slicer；
+* 必须做 `δ=0` vs `δ>0` ablation，证明它确实改善后验 IK 指标。
+
+推荐句子：
+
+> Unlike prior field-based curved slicing methods that primarily optimize printing directions, support-free constraints, collision risk, or mechanical objectives, we introduce a robot-specific pointwise IK-margin term into the scalar-field construction and evaluate its effect by post-hoc path-level IK validation.
+
+---
+
+# Q4：branch consistency / branch volatility 有直接 prior art 吗？
+
+**结论：作为“概念”，它有机器人 IK solution selection / configuration-space continuity 的 prior art；作为“加到 IK feasibility field 里的 branch consistency penalty”，我没有找到直接对应。**
+
+机器人领域早就知道：同一个 TCP pose 可能有多个 IK 解，连续轨迹需要选择一致的 configuration branch，否则会产生跳变。Zhang 2024 的 6R noncuspidal manipulator IKS selection 论文明确说，多 IK solution selection 是 manipulator motion 的 fundamental task，并提出 configuration space decomposition / uniqueness domains，用于 continuous trajectory tracking 或 point-to-point planning 的 configuration invariance。([Springer][7])
+
+Zhang 2021 的 multi-axis AM singularity-aware motion planning 也说明，model coordinate 中平滑、均匀采样的 toolpath，在 machine coordinate 中经过高度非线性映射后可能变成不连续 motion，导致 extrusion 质量问题；该工作把 singularity 和 collision 集成进 motion planning。([arXiv][8])
+
+所以：
+
+* **branch consistency 作为路径级 IK 分支连续性目标，不新；**
+* **branch volatility 作为点位 IK field 的局部质量项，我没有找到直接 prior art；**
+* 它更像把 configuration-space continuity 的思想提前投影到 scalar-field bias 里。
+
+建议论文措辞：
+
+> Inspired by configuration-space continuity requirements in IK solution selection, we define a local branch-volatility score that penalizes spatial neighborhoods where the best IK branch changes frequently. This term is used only as a field-bias term; final branch continuity is still enforced by dynamic programming on extracted paths.
+
+不要写：
+
+> We introduce the first branch consistency concept.
+
+可以写：
+
+> We adapt branch-consistency considerations from IK solution selection to a pre-slicing feasibility field.
+
+这比较稳。
+
+---
+
+# Q5：`η=0.3, σ_ref=0.05, λ_consist=0.5, ε=0.3×layer_height` 这些 magic number 是多大问题？
+
+**结论：在 SCI Q4/EI 工程论文里，不是致命问题；但如果完全不做 sensitivity analysis，会被审稿人抓。最低限度要做小规模 sensitivity。**
+
+这类默认值可以“经验选”，但不能只写：
+
+> chosen empirically
+
+然后不验证。尤其你的 Contribution 1 是 IK-aware scalar field，参数 `δ, σ_ref, λ_consist` 直接影响结果。如果参数一变结果就崩，审稿人会认为方法不稳。
+
+建议分等级：
+
+## 必须做 sensitivity 的参数
+
+### 1. `δ`
+
+这是核心贡献。你文档里已经写了 `δ=0/0.25/0.5/1.0` ablation，这个必须做。
+
+### 2. `η`
+
+因为 `η` 决定是接近平面推进还是贴合法向推进。至少做：
+
+```text
+η = 0, 0.3, 0.6
+```
+
+可以只在 bunny + armadillo 上做，不必三模型全跑。
+
+### 3. `λ_consist`
+
+如果你把 branch consistency 放进 Contribution 1，至少做：
+
+```text
+λ_consist = 0, 0.5, 1.0
+```
+
+或者只做 `with / without branch consistency`。
+
+## 可以作为默认经验值、不大规模扫的参数
+
+```text
+σ_ref = 0.05
+ε = 0.3 × layer_height
+percentile_20
+yaw_samples = 12
+```
+
+这些可以在 appendix 或 supplementary 里做一小段说明：
+
+> Default values were selected from preliminary runs and fixed for all models. We report an ablation on the parameters most directly related to the proposed IK-aware term.
+
+**审稿人会不会因为 magic number 拒稿？**
+通常不会因为单个 magic number 拒，但会因为“核心贡献依赖 magic number 且无 sensitivity”而要求 major revision。最低安全配置：
+
+```text
+主表：4 methods × 3 models
+核心消融：δ
+附加消融：η and branch consistency on bunny/armadillo
+固定其他参数，所有模型同一套默认值
+```
+
+不要给每个模型单独调一套参数，否则会被认为过拟合。
+
+---
+
+# Q6：Dijkstra 加权最短路径生成 scalar field 切等值面是否有直接对应？是不是新颖性？
+
+**结论：Dijkstra 本身不是新颖性；“用 geodesic/distance scalar field 的等值面做曲面层”也不是新颖性。你能 claim 的是：在 voxel-volume weighted graph 上，把 cavity/orientation/curvature/IK/branch-consistency 这些 robot-aware penalty 组合进一个 Dijkstra accumulation field。**
+
+Xu 2019 已经做了 shape-constrained geodesic distance field，并由 iso-geodesic contours / curved layers 构造曲面层；他们用的是曲面 geodesic / MMP 这一路，明确说 shape constrained geodesic field 和 iso-contours。
+
+Li/He/Wang/Tang 2020 的 geodesic distance field-based curved layer volume decomposition 在 tetrahedral mesh 上建立 geodesic distance field，其值是到 base 的 geodesic distance，然后通过 iso-geodesic distance surfaces 自然分解为 curved layers。([arXiv][9])
+
+Li 2022 用 vector field-based 方法，通过 optimal printing orientation vector field 生成单调 scalar distance field，再用其 isosurfaces 切曲面层。([科学直接][1])
+
+S³-Slicer / Neural Slicer 也都属于“scalar field / mapping → isosurfaces → curved layers”的家族。Neural Slicer 2024 甚至明确说，多轴 3D printing 方法通常在输入模型内部定义 scalar field 并提取 isosurfaces 作为 curved layers。([arXiv][10])
+
+因此，审稿人可能会说：
+
+> This is a weighted geodesic / distance-field variant.
+
+这个批评成立。你不要把“Dijkstra 距离场切等值面”说成核心新算法。Dijkstra 是经典 weighted graph shortest path 方法；作为离散实现它可被看成 geodesic / Eikonal 类距离场的工程替代。
+
+安全 claim：
+
+> We use a graph-based weighted distance field as a practical discretization for manufacturability-biased curved-layer generation.
+
+中等 claim：
+
+> Compared with existing geodesic or vector-field scalar slicers, our field incorporates robot-specific pointwise IK and branch-volatility costs before layer extraction.
+
+不要写：
+
+> We propose a new Dijkstra-based curved layer slicing theory.
+
+真正 novelty 不在 Dijkstra，而在 **robot-specific manufacturability terms injected before slicing**。
+
+---
+
+# Q7：`D0 → tool pose → p_ik → D_final` 4-pass 解循环依赖，有类似 prior art 吗？
+
+**结论：我没有找到多轴曲面切片文献中这个 4-pass 结构的直接 prior art。它更像工程上的 one-shot alternating / fixed-point approximation。论文里需要解释，不要当 implementation detail 一笔带过。**
+
+循环依赖是实质性的：
+
+```text
+field D  -> layer normal / tool axis
+tool axis -> IK feasibility
+IK feasibility -> field weights
+field weights -> new field D_final
+```
+
+如果你不解释，审稿人会问：为什么只做一次？为什么不迭代到收敛？为什么不会振荡？
+
+文献上，类似思想存在于大类方法里：
+
+* S³-Slicer / Neural Slicer 通过 field/mapping optimization 直接让 local printing directions 满足制造目标；这属于把 direction and scalar field 放在同一优化框架里。([研究探索者 曼彻斯特大学][4])
+* INF-3DP 2025 更进一步把 toolpath generation、multi-axis motion、collision handling 放进 unified implicit neural field pipeline。([arXiv][6])
+
+但你的 4-pass 不是这种 fully coupled optimization。它是低成本近似：
+
+```text
+initial field -> approximate tool axis -> compute IK cost -> recompute biased field
+```
+
+论文里建议专门用一小节写：
+
+> Decoupling of field construction and robot feasibility
+
+并明确：
+
+1. full joint optimization 很复杂，不是本文目标；
+2. 本文采用 one-shot reweighting；
+3. `D0` 提供稳定的 tool-axis estimate；
+4. `p_ik` 只做 soft bias；
+5. 最终 trajectory-level DP/validation 才决定可行性；
+6. 若 `D_final` 与 `D0` 偏差过大，则降低 `δ` 或报告失败。
+
+不要写“解决循环依赖”。写：
+
+> We break the circular dependency by a one-shot reweighting scheme.
+
+更准确。
+
+---
+
+# Q8：Contribution 1 最安全措辞，给 3 个版本
+
+下面给你三个版本。根据实验结果选择。
+
+---
+
+## 版本 A：保守版，最不容易被打
+
+> **We introduce a robot-aware reweighting term for scalar-field-based curved-layer slicing.** The term is computed from a KR4-specific pointwise IK margin, including joint-limit, singularity, workspace, and local branch-volatility indicators. It is used as a soft bias during graph-based distance-field construction, while final path-level feasibility is verified by cyclic IK dynamic programming and collision validation.
+
+这个版本最安全。它不说 first，不说 guarantee，不说比谁强。适合实验结果一般、mao 只勉强 OK 或部分失败时使用。
+
+---
+
+## 版本 B：中等版，建议默认使用
+
+> **We propose an IK-aware manufacturability-weighted scalar field for six-axis FDM curved-layer generation.** Unlike post-hoc IK filtering, the proposed method injects a KR4-specific pointwise IK-margin and branch-volatility cost into the graph-based distance-field construction before extracting curved layers. Ablation against the same field without IK terms shows how pre-slicing robot feasibility bias affects layer quality and downstream trajectory success.
+
+这个版本把“不是事后筛选”说清楚，是你真正的新意。前提是你必须有 `δ=0` vs `δ>0` 消融。
+
+---
+
+## 版本 C：激进版，只有实验很强时再用
+
+> **To the best of our knowledge, this is the first practical curved-layer slicing pipeline that injects a serial-robot-specific IK-margin field, including local branch-consistency information, into scalar-field construction before layer extraction.** The formulation couples graph-based curved-layer generation with KR4-specific reachability priors and is validated by path-level IK dynamic programming, conservative collision checking, and KRL-compatible dry-run trajectories.
+
+这个版本有风险。`to the best of our knowledge` 可以降低风险，但如果审稿人指出某个近年 robot-assisted field optimizer 也做了类似 robot feasibility injection，就会被打。尤其 2024 Neural Slicer 和 2025 INF-3DP 已经把 manufacturing objectives / collision / motion planning 往 field optimization 里推得很远；虽然它们不是你的 KR4 IK margin Dijkstra formulation，但“first practical”这种话仍然危险。([arXiv][10])
+
+我建议论文正文用 **版本 B**，摘要用 **版本 A 的语气**，答辩或 poster 里可以口头强调“我们没有在 prior art 里找到 KR4-specific IK margin injected into scalar-field construction”。
+
+---
+
+# 最后给你的 prior-art 定位表
+
+| 设计点                                     |                                   直接 prior art？ | 最安全定位                                                            |
+| --------------------------------------- | ----------------------------------------------: | ---------------------------------------------------------------- |
+| `B=(1-η)build+ηnormal`                  |                                         没找到直接公式 | direction-field 方法启发下的工程 blend                                   |
+| 32-ray `percentile_20/2` opening radius |                                         没找到直接方法 | ray-sampled cavity/opening-risk proxy；不是 LFS/reach               |
+| pointwise IK margin 注入 scalar field     |                           没找到 KR4/Dijkstra 直接对应 | robot-specific pre-slicing feasibility bias                      |
+| branch consistency / volatility         | 路径级 IK continuity 有 prior；field penalty 没找到直接对应 | 从 configuration-space IK selection 借鉴到 pre-slicing field         |
+| magic numbers                           |                                          常见但需消融 | δ 必做；η/branch consistency 建议小消融                                  |
+| Dijkstra distance field slicing         |  geodesic/distance field slicing 已有；Dijkstra 不新 | 工程离散化 + robot-aware weights                                      |
+| 4-pass `D0→pose→p_ik→Dfinal`            |                                         没找到直接对应 | one-shot reweighting / decoupled approximation                   |
+| Contribution 1                          |                                          可立，但要窄 | “IK-aware manufacturability-weighted scalar field”，不 claim first |
+
+我的建议：**不要把 v6.2 的新颖性押在 Dijkstra、direction blend、opening-radius proxy 上。**
+新颖性只押这一句：
+
+> **在曲面层提取前，把 KR4-specific pointwise IK margin 和 branch-volatility 信息作为 soft penalty 注入制造性加权 scalar field，并用后验路径级 DP/collision validation 证明这个 bias 有用。**
+
+[1]: https://www.sciencedirect.com/science/article/abs/pii/S0736584522000503 "Vector field-based curved layer slicing and path planning for multi-axis printing - ScienceDirect"
+[2]: https://www.cs.jhu.edu/~misha/Fall13b/Papers/Amenta99.pdf?utm_source=chatgpt.com "Surface Reconstruction by Voronoi Filtering"
+[3]: https://guoxinfang.github.io/ReinforcedFDM?utm_source=chatgpt.com "ReinforcedFDM"
+[4]: https://research.manchester.ac.uk/en/publications/ssup3sup-slicer-a-general-slicing-framework-for-multi-axis-3d-pri/ "
+        S>3>-Slicer: A General Slicing Framework for Multi-Axis 3D Printing
+      \-  Research Explorer The University of Manchester"
+[5]: https://www.sciencedirect.com/science/article/pii/S2214860424002938 "Topological awareness towards collision-free multi-axis curved layer additive manufacturing - ScienceDirect"
+[6]: https://arxiv.org/abs/2509.05345 "[2509.05345] INF-3DP: Implicit Neural Fields for Collision-Free Multi-Axis 3D Printing"
+[7]: https://link.springer.com/article/10.1007/s10846-023-02029-4 "A Novel Method for Selecting Inverse Kinematic Solutions Based on Configuration Space Partition for 6R Noncuspidal Manipulators | Journal of Intelligent & Robotic Systems | Springer Nature Link"
+[8]: https://arxiv.org/abs/2103.00273 "[2103.00273] Singularity-aware motion planning for multi-axis additive manufacturing"
+[9]: https://arxiv.org/abs/2003.05938 "[2003.05938] Geodesic Distance Field-based Curved Layer Volume Decomposition for Multi-Axis Support-free Printing"
+[10]: https://arxiv.org/html/2404.15061v1 "Neural Slicer for Multi-Axis 3D Printing"

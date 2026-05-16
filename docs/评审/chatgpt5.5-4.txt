@@ -1,0 +1,1058 @@
+## 先给结论
+
+v6 **可以作为 10–12 周保毕业工程方案推进**，但还有 6 个必须改写的点。它们不是让方案作废的 conceptual flaw，但如果不改，CLI #2 会在实现时掉坑，论文也会被审稿人抓住。
+
+最重要的一句：
+
+> **v6 不能再说“把 C1–C4 翻译成边权后，距离场天然避开困难区域”。只能说“用边权偏置 scalar field，随后用后验验证量化 C1–C4 违反”。**
+
+你当前 v6 的目标、硬件、L4 交付、10–12 周预算、mao stress test、KRL offline 优先这些设定是合理的。但 Stage 2–6 的工程实现要按“软引导 + 硬验证”来组织，而不是按“边权等价于制造约束”来组织。
+
+---
+
+# A. v6 剩余根本问题
+
+## A1. 硬约束被软边权替代，这是 v6 最大剩余问题
+
+你把 C1–C4 翻译成 `p_clear, p_orient, p_curv, p_ik` 边权，然后用 Dijkstra 生成 `D_final`。这在工程上有用，但它不是约束满足算法。只要没有替代路径，Dijkstra 仍会穿过高代价区域。也就是说：
+
+```text
+高 penalty ≠ 禁止
+有限 penalty ≠ collision-free
+有限 penalty ≠ IK feasible
+有限 penalty ≠ support-free
+```
+
+修正方式：
+
+```text
+soft penalty:
+    p_clear, p_curv, p_ik 用于引导 scalar field
+
+hard mask:
+    truly impossible regions 用 binary infeasible mask 标出来
+
+post validation:
+    C1/C2/C3/C4 全部以后验统计为准
+```
+
+论文写法必须改成：
+
+> The scalar field is manufacturability-biased, not manufacturability-guaranteed.
+
+CLI #2 要实现两个输出：
+
+```text
+field_metrics.json:
+    mean_penalty
+    max_penalty
+    high_penalty_voxel_ratio
+    hard_infeasible_ratio
+
+validation_report.json:
+    C1_support_violation_ratio
+    C2_ik_failure_ratio
+    C3_collision_failure_ratio
+    C4_curvature_violation_ratio
+```
+
+---
+
+## A2. `C(x)=nearest distance to surface` 不是喷头 clearance
+
+你现在 Stage 1 说 `Clearance field C(x) = nearest distance to surface`，Stage 2 用它构造 `p_clear`。这有两个问题：
+
+第一，nearest distance to final surface 不是 nozzle-body clearance。喷头是有方向的圆柱/胶囊，clearance 应该依赖姿态：
+
+```text
+clearance(x, R_tool) = distance(nozzle_body(x, R_tool), printed_or_final_geometry)
+```
+
+第二，C3 真正关心的是“相对于已打印部分”的碰撞，而不是相对于最终模型表面的距离。最终模型表面附近本来就是要接近的地方，用 final-surface distance 直接当喷头 clearance 会误导。
+
+修正方式：
+
+Stage 2 的 `p_clear` 只能定义成 **geometric cavity risk**：
+
+```text
+p_cavity(v) = max(0, r_n + margin - local_opening_radius(v))²
+```
+
+真正 C3 放到 Stage 6：
+
+```text
+FCL capsule/cylinder vs accumulated printed mesh
+```
+
+论文不要把 `p_clear` 写成 collision-free 证明，只写成 collision-risk prior。
+
+---
+
+## A3. C1 support-free 没有被 scalar field 自动保证
+
+从底部出发的 Dijkstra field 会产生一个单调顺序，但这不等价于 ASN 粘合。等值面之间可能局部距离过大、层面碎裂、最大组件过滤后局部缺支撑、Marching Cubes 插值后接触关系改变。你原始 v4 里 C1 是离散 ASN 约束；v6 现在没有显式构造 ASN，只是借 scalar field 隐含顺序。
+
+修正方式：
+
+Stage 3 后必须做 layer support check：
+
+```text
+for each sampled point p on layer k:
+    project/search nearest points on layer k-1
+    support_ok if distance(p, layer_{k-1}) <= support_radius
+              and normal/contact angle <= threshold
+```
+
+输出：
+
+```text
+support_violation_heatmap.ply
+support_pass_rate_per_layer.csv
+```
+
+论文写法：
+
+> C1 is evaluated post hoc by local inter-layer support tests.
+
+不要写：
+
+> C1 is encoded by shortest-path field.
+
+---
+
+## A4. `D_final ∈ [0,1]` 与 `iso = k × layer_height` 单位冲突
+
+你写 Pass 4 把 `D_final` 归一化到 `[0,1]`，Stage 3 又写 `Marching cubes at D_final = k × layer_height`。这在单位上不对。
+
+修正方式：
+
+保留两个版本：
+
+```text
+D_mm      # 有物理单位，Dijkstra 累积距离，单位 mm
+D_norm    # 仅可视化，D_mm / max(D_mm)
+```
+
+等值面只能用：
+
+```text
+iso_k = k * h_layer_mm
+MC(D_mm, iso_k)
+```
+
+`D_norm` 只用于图和论文伪彩色，不参与层高。
+
+CLI #2 必须在代码里禁止用 normalized field 切片：
+
+```cpp
+assert(field.unit == FieldUnit::Millimeter);
+```
+
+---
+
+## A5. per-voxel `tool_x = path_tangent_estimate` 不稳定
+
+Stage 2 Pass 2 里你用 `tool_z = -n, tool_x = path_tangent_estimate, tool_y = z × x` 估每个 voxel 的工具姿态；但 path tangent 在路径生成前并不存在。即使估一个局部 tangent，也会在等值面奇异点、碎片边界、闭合曲线转角处不连续，导致 `p_ik` 产生人为跳变。
+
+修正方式：
+
+Stage 2 不要固定完整工具姿态，只固定 tool axis：
+
+```text
+tool_z(v) = -normalize(∇D0(v))
+yaw ψ remains free
+```
+
+然后构造稳定参考轴：
+
+```text
+ref = world_x
+if |dot(ref, tool_z)| > 0.9:
+    ref = world_y
+
+tool_x0 = normalize(ref - dot(ref, tool_z) * tool_z)
+tool_y0 = cross(tool_z, tool_x0)
+Rψ = rotate_about(tool_z, ψ) * [tool_x0, tool_y0, tool_z]
+```
+
+真正 path tangent 放到 Stage 5 路径点上处理，不放在 voxel IK field 阶段。
+
+---
+
+## A6. “每层最大组件”不能静默删几何
+
+Stage 3 写“连通性 filter，每层最大组件；最大组件 <80% 整层面积标 BROKEN”。问题是：保留最大组件会直接丢几何。对于 bunny 可能没事，对于 armadillo 四肢、耳朵、尾巴或 mao 头发碎片，丢掉小组件会让覆盖率虚高。
+
+修正方式：
+
+```text
+不要默认删除小组件。
+先全部输出。
+再按 area ratio 标注：
+    MAIN
+    SMALL_COMPONENT
+    BROKEN_LAYER
+```
+
+只有在路径生成阶段允许：
+
+```text
+--component-policy all | largest | area-threshold
+```
+
+论文指标必须报告：
+
+```text
+deleted_area_ratio
+component_count_per_layer
+broken_layer_count
+```
+
+---
+
+## A7. `igl::exact_geodesic` 等值线不一定是可打印填充路径
+
+Stage 4 复用 v4 §13，用每层 mesh 上的测地距离等值线生成 polylines。这会生成“曲面上的线”，但不一定覆盖一个曲面层的沉积面积。FDM 要么是 shell-only，要么需要 raster/spiral/offset infill。单纯 geodesic iso-curves 可能出现：
+
+```text
+路径间距不均
+局部漏填
+闭合区域内部没有 infill
+边界附近断裂
+多组件层路径顺序混乱
+```
+
+修正方式：
+
+毕业版先明确目标：
+
+```text
+目标不是完整实体填充强度优化；
+目标是曲面层表面的可执行 deposition curves。
+```
+
+但工程上至少要做两个 path mode：
+
+```text
+mode A: geodesic-contour shell paths    # 复用 v4 §13
+mode B: projected-grid raster paths     # fallback，稳定出路径
+```
+
+如果 geodesic stitching 失败，自动 fallback 到 raster。
+
+---
+
+## A8. Stage 0 的 Hausdorff ≤0.5mm 与 dilation 可能互相矛盾
+
+你要求 decimation 去除 `<0.5mm` 细节、薄壁 dilation，又要求 `Hausdorff(M,M')≤0.5mm` 和法向偏离 ≤5°。薄壁 dilation 很容易让 Hausdorff 超过 0.5mm，局部 smoothing 也可能让法向超过 5°。这两个硬约束不能同时绝对化。
+
+修正方式：
+
+分两类报告：
+
+```text
+geometry_clean:
+    hole filling, manifold repair, decimation
+    should satisfy Hausdorff <= 0.5mm
+
+manufacturing_regularized:
+    optional dilation / smoothing
+    may violate Hausdorff, but must report deviation
+```
+
+论文不要写“硬约束必满足”，写：
+
+```text
+bounded regularization, reported by Hausdorff / normal / volume / silhouette metrics
+```
+
+---
+
+# B. 10 个 Pitfalls 逐条评估
+
+| Pitfall                | 判定  | 影响交付？ | 处理方式                                                                                                                             |
+| ---------------------- | --- | ----: | -------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Pass 2 鸡生蛋          | 真问题 |     中 | 不迭代。只做两次：`D0 → p_ik → D_final`。如果 `D_final` 与 `D0` 偏差过大，降低 `δ`，不做无限迭代。                                                           |
+| 2. `p_ik` 不连续          | 真问题 |     高 | 对 `p_ik` 做 winsorize + Gaussian/median smoothing；`δ` 做上限；保留 hard infeasible mask。                                                |
+| 3. yaw 采样密度            | 真问题 |     中 | Stage 2 用 12；Stage 5 用 adaptive：先 12，失败段局部升到 24。不要全局 24。                                                                         |
+| 4. cyclic DP 难度        | 真问题 |     中 | 先实现 open DP；闭合路径用 endpoint repair；Week 7 再实现 true cyclic。                                                                        |
+| 5. FCL printed BVH 增量  | 被高估 |     中 | 不做 per-point 增量 BVH。按 layer/block rebuild BVH，先保证正确。                                                                             |
+| 6. post-quintic FCL 爆炸 | 真问题 |     高 | 分层验证：SDF prefilter 全帧，FCL 只查 high-risk frames + fixed stride；失败段局部加密。                                                            |
+| 7. mao 语义损失            | 真问题 |     中 | 用 Hausdorff/normal/volume + silhouette overlap；加原图/处理后对比。不要证明“还像 mao”，只报告 shape deviation。                                       |
+| 8. 权重调参                | 真问题 |     高 | 不做 4D grid。固定 `α,β,γ`，只消融 `δ`；再做 one-factor ablation。                                                                            |
+| 9. bunny 实机兜底          | 真问题 |     高 | 准备 “rounded cube / small bunny” fallback。论文承诺“至少一个 physical print”，不要只押 full bunny。                                              |
+| 10. baseline           | 真问题 |     中 | 至少 3 个 baseline：planar slicing、pure geometric Dijkstra、v6 without IK term。v4 PDE baseline 可作为 failure comparison，不作为唯一 baseline。 |
+
+你漏掉的额外 Pitfalls：
+
+1. **Dijkstra 内存爆炸**：0.5mm voxel 对 mao 可能太大。CLI 默认应支持 `--voxel 1.0`、`--voxel 0.8`、`--voxel 0.5` 三级。
+2. **单位/坐标系错误**：STL 坐标、机器人 base、TCP、喷头轴、KRL 坐标常常是最大工程坑。必须 Week 1 就做 frame audit。
+3. **路径数量爆炸**：每层多个 component、多条 contour，会让 IK DP 输入远大于预期。必须有 path simplification。
+4. **KRL 只输出 OK segment 会造成轨迹不连续**：OK segment 之间需要 retract / travel move，否则实际机器人无法从一个 OK island 跳到另一个。
+5. **FDM extrusion 未建模**：线宽、流量、速度、启停、回抽没有进入算法。论文要写为 geometric/kinematic validation，不写 full process optimization。
+
+---
+
+# C. 给 CLI #2 的工程总架构
+
+## C1. v4 复用关系
+
+CLI #2 不要重写 v4 代码。按这个映射复用：
+
+```text
+v4 §11:
+    复用 KR4 FK / analytic IK / qlim / Jacobian 基础函数
+    扩展为:
+        RobotModelKR4
+        IKCandidateGenerator
+        ManipulabilityMetric
+        WorkspaceMargin
+
+v4 §12:
+    复用已有 voxel / SDF / nozzle geometry / constraint utilities
+    扩展为:
+        VoxelGrid
+        SDFGrid
+        ClearanceGrid
+        CurvatureEstimator
+        FieldIO
+
+v4 §13:
+    复用 geodesic path / iso-curve / stitching / resampling
+    扩展为:
+        LayerPathExtractor
+        ComponentAwarePathPlanner
+        RasterFallback
+
+v4 §14:
+    复用 time parameterization / quintic smoothing / trajectory.csv / KRL writer
+    扩展为:
+        CyclicIKDP
+        TrajectoryValidator
+        KRLWriterOKSegments
+```
+
+你上传的 v6 也明确要求基于已有 v4 §11/§12/§13/§14，不要重新发明轮子。
+
+---
+
+## C2. 建议目录结构
+
+```text
+src/
+  app/
+    curved_slicer.cpp
+    toolpath_validate.cpp
+    export_krl.cpp
+
+  geometry/
+    MeshRepair.cpp/.h
+    MeshRegularization.cpp/.h
+    Voxelizer.cpp/.h
+    SDFGrid.cpp/.h
+    CurvatureEstimator.cpp/.h
+    HausdorffMetrics.cpp/.h
+
+  field/
+    WeightedDijkstraField.cpp/.h
+    FieldWeights.cpp/.h
+    IKFeasibilityField.cpp/.h
+    FieldSmoothing.cpp/.h
+    FieldIO.cpp/.h
+
+  layers/
+    MarchingCubesLayers.cpp/.h
+    LayerMetrics.cpp/.h
+    SupportChecker.cpp/.h
+    ComponentLabeler.cpp/.h
+
+  path/
+    GeodesicContourPath.cpp/.h        # wrap v4 §13
+    RasterFallbackPath.cpp/.h
+    PathStitcher.cpp/.h
+    PathResampler.cpp/.h
+
+  robot/
+    KR4Model.cpp/.h                   # wrap v4 §11
+    AnalyticIK.cpp/.h
+    Jacobian.cpp/.h
+    IKCandidateGenerator.cpp/.h
+    CyclicIKDP.cpp/.h
+    TimeParameterization.cpp/.h
+
+  collision/
+    NozzleModel.cpp/.h
+    SDFClearancePrefilter.cpp/.h
+    FCLValidator.cpp/.h
+    PrintedPartBVH.cpp/.h
+
+  export/
+    CSVWriter.cpp/.h
+    KRLWriter.cpp/.h                  # wrap v4 §14
+    DiagnosticWriter.cpp/.h
+
+  diagnostics/
+    HeightSweepDiagnostic.cpp/.h
+    FailureHeatmap.cpp/.h
+    AblationRunner.cpp/.h
+
+configs/
+  kr4_r600.yaml
+  nozzle_fdm_10mm.yaml
+  default_weights.yaml
+  experiment_bunny.yaml
+  experiment_armadillo.yaml
+  experiment_mao.yaml
+
+tests/
+  test_ik.cpp
+  test_dijkstra_field.cpp
+  test_layer_units.cpp
+  test_cyclic_dp.cpp
+  test_fcl_validator.cpp
+```
+
+---
+
+## C3. 三个 CLI，不要做成一个巨型 CLI
+
+### CLI 1：曲面层生成
+
+```bash
+curved_slicer \
+  --input data/bunny.stl \
+  --robot configs/kr4_r600.yaml \
+  --nozzle configs/nozzle_fdm_10mm.yaml \
+  --voxel 0.8 \
+  --layer-height 1.2 \
+  --weights configs/default_weights.yaml \
+  --enable-ik-field false \
+  --out runs/bunny_geo
+```
+
+输出：
+
+```text
+mesh_clean.ply
+D0_mm.vti
+D_final_mm.vti
+layers/*.ply
+metrics/layer_metrics.csv
+metrics/field_metrics.json
+```
+
+### CLI 2：路径 + IK + 碰撞 dry-run
+
+```bash
+toolpath_validate \
+  --layers runs/bunny_geo/layers \
+  --robot configs/kr4_r600.yaml \
+  --nozzle configs/nozzle_fdm_10mm.yaml \
+  --yaw-samples 12 \
+  --top-k 12 \
+  --fcl-level 2 \
+  --out runs/bunny_validate
+```
+
+输出：
+
+```text
+paths/*.polyline
+trajectory.csv
+validation_report.json
+failure_heatmap.ply
+```
+
+### CLI 3：KRL 输出
+
+```bash
+export_krl \
+  --trajectory runs/bunny_validate/trajectory.csv \
+  --only-ok true \
+  --out runs/bunny_krl
+```
+
+输出：
+
+```text
+bunny_ok.src
+bunny_ok.dat
+segment_status.csv
+```
+
+---
+
+# D. 12 周实施计划
+
+## Week 1：工程骨架 + 坐标系 + v4 代码封装
+
+**目标：** 建立可编译工程，把 v4 §11/§12/§13/§14 封装成可调用模块。
+
+任务：
+
+* 建立 CMake 工程与目录结构（0.5 天）
+  文件：`CMakeLists.txt`, `src/app/*.cpp`, `configs/*.yaml`
+  依赖：Eigen, libigl, yaml-cpp
+  产出：三个 CLI 空壳可运行
+  验收：`curved_slicer --help`, `toolpath_validate --help`, `export_krl --help` 正常输出
+
+* 封装 v4 §11 KR4 机器人模块（1.5 天）
+  文件：`src/robot/KR4Model.cpp`, `src/robot/AnalyticIK.cpp`, `src/robot/Jacobian.cpp`
+  依赖：v4 §11
+  产出：FK/IK/Jacobian API
+  验收：100 个随机 joint → FK → IK，至少能找回等价解；平均 TCP 误差 < 0.5mm，姿态误差 < 1°
+
+* 封装 v4 §13 路径模块接口，不实现新功能（0.5 天）
+  文件：`src/path/GeodesicContourPath.cpp`
+  依赖：v4 §13
+  产出：输入 layer mesh，输出 polyline 的接口
+  验收：用 sphere layer 生成至少 1 条闭合 polyline
+
+* 封装 v4 §14 trajectory/export 模块（1 天）
+  文件：`src/robot/TimeParameterization.cpp`, `src/export/CSVWriter.cpp`, `src/export/KRLWriter.cpp`
+  依赖：v4 §14
+  产出：dummy trajectory → CSV/KRL
+  验收：生成 `.csv/.src/.dat`，字段完整
+
+* 坐标系审计文档（0.5 天）
+  文件：`docs/frames.md`
+  内容：STL frame、grid frame、robot base、TCP、tool_z、KRL frame
+  验收：画一张 frame diagram；所有 transform 都有名字
+
+风险：v4 代码耦合严重，无法直接封装。
+失败 fallback：只保留 v4 代码路径，写 adapter，不做重构。
+
+---
+
+## Week 2：Mesh repair + voxel/SDF + 单位正确的 Dijkstra field
+
+**目标：** 完成不含 IK 的几何 weighted distance field，能切出第一版 bunny curved layers。
+
+任务：
+
+* Mesh repair 与轻量 regularization（1 天）
+  文件：`src/geometry/MeshRepair.cpp`, `src/geometry/MeshRegularization.cpp`
+  依赖：libigl
+  产出：`mesh_clean.ply`
+  验收：输出 manifold check、hole count、自交 count；bunny 能通过
+
+* Voxelizer + SDFGrid（1.5 天）
+  文件：`src/geometry/Voxelizer.cpp`, `src/geometry/SDFGrid.cpp`
+  依赖：v4 §12 或 libigl winding number
+  产出：`sdf.vti`, `occupancy.vti`
+  验收：sphere 的体积误差 < 5%；inside/outside 可视化正确
+
+* WeightedDijkstraField 基础版（1.5 天）
+  文件：`src/field/WeightedDijkstraField.cpp`, `src/field/FieldWeights.cpp`
+  依赖：VoxelGrid
+  产出：`D0_mm.vti`
+  验收：sphere/cube 上 `D0_mm` 从 bottom 单调增加；单位为 mm，不归一化切片
+
+* Marching Cubes layer extraction（1 天）
+  文件：`src/layers/MarchingCubesLayers.cpp`
+  依赖：libigl/copyleft marching cubes 或现有 MC
+  产出：`layers/*.ply`
+  验收：bunny 以 `h=1.2mm` 输出 >20 层；无空文件
+
+风险：0.5mm voxel 太慢。
+失败 fallback：Week 2 全部用 1.0mm voxel，0.5mm 延后。
+
+---
+
+## Week 3：基础场权重 + layer metrics + geometry-only baseline
+
+**目标：** 完成 `α/β/γ` 几何版，建立第一组论文指标。
+
+任务：
+
+* Clearance/cavity risk 近似场（1 天）
+  文件：`src/field/FieldWeights.cpp`, `src/geometry/SDFGrid.cpp`
+  产出：`p_clear.vti`
+  验收：narrow cavity synthetic model 中高风险区域可视化正确
+
+* Curvature estimator 简化版（1 天）
+  文件：`src/geometry/CurvatureEstimator.cpp`
+  依赖：mesh principal curvature + voxel interpolation
+  产出：`p_curv.vti`
+  验收：sphere 曲率估计误差中位数 < 25%；cube corner 标为高风险即可，不要求精确
+
+* Layer metrics（1 天）
+  文件：`src/layers/LayerMetrics.cpp`, `src/layers/ComponentLabeler.cpp`
+  产出：`layer_metrics.csv`
+  指标：layer area、component count、largest component ratio、broken flag、deleted area ratio
+  验收：synthetic two-island model component count 正确
+
+* Support checker 初版（1 天）
+  文件：`src/layers/SupportChecker.cpp`
+  产出：`support_metrics.csv`, `support_heatmap.ply`
+  验收：sphere 层间 support pass rate >90%；故意增大 layer height 后 pass rate 下降
+
+* bunny + armadillo geometry-only run（1 天）
+  文件：`scripts/run_bunny_geo.sh`, `scripts/run_armadillo_geo.sh`
+  产出：两模型 layers + metrics
+  验收：bunny broken layers <10%；armadillo 可出完整 metrics
+
+风险：curvature 噪声影响太大。
+失败 fallback：`γ=0`，curvature 只作为 diagnostic，不进入边权。
+
+---
+
+## Week 4：IK feasibility field `p_ik`，但不接路径 DP
+
+**目标：** 实现 v6 的窄新意：pointwise IK margin 进入 scalar field。
+
+任务：
+
+* 稳定 tool-axis frame 构造（0.5 天）
+  文件：`src/field/IKFeasibilityField.cpp`
+  产出：`tool_axis.vti`
+  验收：无 NaN；`∇D0≈0` 区域标 invalid
+
+* IKCandidateGenerator：voxel 点位 × yaw × 8 branch（1.5 天）
+  文件：`src/robot/IKCandidateGenerator.cpp`
+  依赖：v4 §11
+  产出：候选统计
+  验收：bunny 采样 10k voxels，运行时间可接受；valid IK ratio 输出
+
+* `p_ik` penalty 实现（1 天）
+  文件：`src/field/IKFeasibilityField.cpp`
+  产出：`p_ik_raw.vti`, `p_ik_smooth.vti`
+  验收：关节限位附近 penalty 升高；奇异附近 penalty 升高；无 IK 区域 `P_max`
+
+* `D_final_mm` 生成（1 天）
+  文件：`src/field/WeightedDijkstraField.cpp`
+  产出：`D_final_mm.vti`
+  验收：`δ=0` 时与 `D0` 一致；`δ>0` 时 field deviation 有记录
+
+* IK-field ablation smoke test（0.5 天）
+  文件：`scripts/ablate_delta_smoke.sh`
+  产出：`delta_0/0.5/1.0` 三组 bunny layers
+  验收：metrics JSON 中有 `field_deviation_from_D0`
+
+风险：`p_ik` 太慢。
+失败 fallback：只在 surface-near voxels / downsampled grid 计算 `p_ik`，再插值。
+
+---
+
+## Week 5：路径生成稳定化 + raster fallback
+
+**目标：** 从 layers 生成可被 IK DP 消化的 polylines。
+
+任务：
+
+* 复用 v4 §13 geodesic contour path（1 天）
+  文件：`src/path/GeodesicContourPath.cpp`
+  产出：`paths/layer_*.polyline`
+  验收：bunny 至少 80% layers 有路径
+
+* Path stitching 与 component-aware 排序（1 天）
+  文件：`src/path/PathStitcher.cpp`
+  产出：每层 path list + metadata
+  验收：多组件 synthetic model 不崩；每个 component 有 status
+
+* Resampling + simplification（0.5 天）
+  文件：`src/path/PathResampler.cpp`
+  产出：0.2mm 或可配置 spacing 的 polyline
+  验收：点间距 mean error <10%
+
+* Raster fallback（1.5 天）
+  文件：`src/path/RasterFallbackPath.cpp`
+  产出：geodesic 失败时仍能生成路径
+  验收：geodesic 故意失败时 fallback 生效
+
+* path metrics（0.5 天）
+  文件：`src/path/PathMetrics.cpp`
+  指标：path length、closed/open、point count、component count
+  验收：输出 `path_metrics.csv`
+
+风险：`exact_geodesic` 在破碎层上不稳定。
+失败 fallback：论文主实验路径使用 raster fallback，geodesic 作为可选。
+
+---
+
+## Week 6：open-loop IK DP + 时间参数化
+
+**目标：** 先解决非闭合 / 分段路径的 IK branch continuity。
+
+任务：
+
+* Candidate pruning top-K（1 天）
+  文件：`src/robot/IKCandidateGenerator.cpp`
+  产出：每点最多 K=12 states
+  验收：candidate dump 中无点超过 K；保留最低 penalty states
+
+* Open-loop Viterbi DP（1.5 天）
+  文件：`src/robot/CyclicIKDP.cpp` 但先实现 `solveOpen()`
+  产出：`ik_solution.csv`
+  验收：synthetic circle path 能找到连续 branch；`max |Δq|` 满足设定
+
+* Time parameterization 初版（1 天）
+  文件：`src/robot/TimeParameterization.cpp`
+  产出：timestamped trajectory
+  验收：速度约束无 violation；CSV 可视化关节角连续
+
+* Singularity/joint-limit report（0.5 天）
+  文件：`src/robot/IKMetrics.cpp`
+  产出：`ik_metrics.json`
+  验收：输出 min σ、joint margin、失败点 index
+
+* bunny path dry-run（1 天）
+  文件：`scripts/run_bunny_ik_open.sh`
+  产出：bunny trajectory.csv
+  验收：bunny IK pass rate >70%，否则调整 model placement，而不是调算法
+
+风险：模型摆放导致 KR4 reachability 很差。
+失败 fallback：引入 `--model-transform`，先把模型移动到最佳工作区。
+
+---
+
+## Week 7：cyclic DP + yaw adaptive refinement
+
+**目标：** 解决闭合曲线腕翻转和首尾不连续。
+
+任务：
+
+* cyclic DP 实现（1.5 天）
+  文件：`src/robot/CyclicIKDP.cpp`
+  方法：枚举 top-M 起点 state，终点加 closure cost
+  产出：closed-loop solution
+  验收：circle path 首尾 `||Δq|| < threshold`
+
+* endpoint repair fallback（0.5 天）
+  文件：`src/robot/CyclicIKDP.cpp`
+  产出：若 true cyclic 失败，局部重排起点或插入 transition
+  验收：失败时 status 为 `CYCLIC_REPAIR_FAIL`，不静默输出假 OK
+
+* yaw adaptive refinement（1 天）
+  文件：`src/robot/IKCandidateGenerator.cpp`
+  规则：失败段 12→24 yaw samples
+  验收：只在 fail segments 增加 yaw，不全局爆炸
+
+* branch/yaw visualization（0.5 天）
+  文件：`src/diagnostics/FailureHeatmap.cpp`
+  产出：yaw_id/branch_id heatmap
+  验收：能定位 wrist flip
+
+* armadillo IK dry-run（1 天）
+  文件：`scripts/run_armadillo_ik.sh`
+  产出：armadillo IK report
+  验收：输出失败段，而不是程序 abort
+
+风险：cyclic DP 调试时间失控。
+失败 fallback：论文只报告 open DP + endpoint repair；cyclic DP 放 appendix/limitation。
+
+---
+
+## Week 8：FCL validation Level 1/2
+
+**目标：** 实现离线 collision validation，不追求极限速度，先追求正确。
+
+任务：
+
+* Nozzle capsule/cylinder model（0.5 天）
+  文件：`src/collision/NozzleModel.cpp`
+  产出：nozzle mesh/capsule 参数
+  验收：可导出 nozzle preview ply
+
+* SDF clearance prefilter（1 天）
+  文件：`src/collision/SDFClearancePrefilter.cpp`
+  产出：每帧 risk flag
+  验收：明显远离模型的帧不进 FCL；接近模型的帧标 high-risk
+
+* FCLValidator Level 2（1.5 天）
+  文件：`src/collision/FCLValidator.cpp`, `src/collision/PrintedPartBVH.cpp`
+  产出：capsule/cylinder vs printed mesh distance
+  验收：synthetic collision case 正确报 COLLISION_FAIL；free case 正确 OK
+
+* Printed BVH block rebuild 策略（0.5 天）
+  文件：`src/collision/PrintedPartBVH.cpp`
+  策略：每 layer 或每 N paths rebuild，不做复杂增量
+  验收：bunny validation 能在可接受时间内完成
+
+* trajectory status integration（0.5 天）
+  文件：`src/export/CSVWriter.cpp`
+  产出：trajectory.csv 每段 status
+  验收：OK/IK_FAIL/COLLISION_FAIL/SING_RISK/VEL_FAIL 字段齐全
+
+风险：FCL 安装/链接拖时间。
+失败 fallback：先用 libigl signed distance + capsule samples 做 Level 2 proxy；FCL 延后 Week 9。
+
+---
+
+## Week 9：post-quintic validation + KRL OK segments
+
+**目标：** 完成 Stage 6 输出闭环：dense validation、KRL 只输出 OK segments。
+
+任务：
+
+* quintic interpolation dense sampling（1 天）
+  文件：`src/robot/TimeParameterization.cpp`
+  产出：4ms dense trajectory
+  验收：速度/加速度曲线输出；无 NaN；时间单调
+
+* Level 3 dense validation（1 天）
+  文件：`src/collision/FCLValidator.cpp`
+  策略：全帧 SDF prefilter；FCL stride + high-risk frames
+  验收：`validation_report.json` 统计 checked frames、FCL calls、runtime
+
+* KRLWriter OK segment mode（1 天）
+  文件：`src/export/KRLWriter.cpp`
+  产出：`.src/.dat`
+  验收：只输出连续 OK segment；非连续处插入 retract/travel 或分文件
+
+* failure heatmap（0.75 天）
+  文件：`src/diagnostics/FailureHeatmap.cpp`
+  产出：`failure_heatmap.ply`
+  验收：IK/collision/singularity/velocity 颜色可区分
+
+* bunny full dry-run（1.25 天）
+  文件：`scripts/run_bunny_full.sh`
+  产出：layers + paths + trajectory + validation + KRL
+  验收：bunny 至少一个连续 OK segment 可上机
+
+风险：KRL 格式与实际控制器不匹配。
+失败 fallback：先输出 CSV + pseudo-KRL，实机前再手工适配。
+
+---
+
+## Week 10：bunny 实机 / 物理兜底
+
+**目标：** 完成至少一个 physical print 或 dry robot execution。
+
+任务：
+
+* 机器人空跑 dry-run（1 天）
+  文件：`scripts/robot_dryrun_checklist.md`
+  依赖：KUKA controller, safety setup
+  产出：dry-run video/log
+  验收：机器人能按 KRL 跑 OK segment，无奇怪跳变
+
+* 喷头 TCP / base calibration check（1 天）
+  文件：`docs/calibration.md`
+  产出：TCP 偏差估计
+  验收：TCP repeatability 误差记录；不要求完美，但要有数
+
+* 小模型实机打印（1.5 天）
+  模型：优先 rounded cube / small bunny / bunny subset
+  产出：照片、视频、失败记录
+  验收：至少一段曲面路径实际出料成功
+
+* bunny full print attempt（1 天）
+  产出：成功或失败报告
+  验收：如果失败，必须归因到 hardware/calibration/extrusion/algorithm 之一
+
+* 实机数据整理（0.5 天）
+  文件：`runs/physical_print/report.md`
+  验收：论文可用图至少 3 张
+
+风险：机器、喷头、平台独立问题拖垮算法进度。
+失败 fallback：用 rounded cube 或 single-layer curved path 作为 physical print；bunny 改成 robot dry-run + extrusion-off。
+
+---
+
+## Week 11：armadillo / mao stress test + diagnostics
+
+**目标：** 完成复杂模型 dry pipeline 和失败定位报告。
+
+任务：
+
+* armadillo full dry-run（1.25 天）
+  文件：`scripts/run_armadillo_full.sh`
+  产出：full report
+  验收：能输出 IK/collision failure segments；不要求全 OK
+
+* mao 0.8/1.0mm stress test（1.25 天）
+  文件：`scripts/run_mao_stress.sh`
+  产出：annotated infeasibility report
+  验收：程序完整跑完；输出 failure heatmap；不 abort
+
+* height-sweep diagnostic（1 天）
+  文件：`src/diagnostics/HeightSweepDiagnostic.cpp`
+  产出：`height_events.csv`, `diagnostic.json`
+  验收：synthetic merge/split model 检测正确；mao/armadillo 有图
+
+* failure vs topology event overlay（0.75 天）
+  文件：`src/diagnostics/FailureHeatmap.cpp`
+  产出：论文图
+  验收：至少 2 张图：armadillo、mao
+
+* Geometry regularization metrics（0.75 天）
+  文件：`src/geometry/HausdorffMetrics.cpp`
+  指标：Hausdorff、normal deviation、volume change、silhouette overlap
+  验收：mao 原始/处理后对比图和指标表
+
+风险：mao 0.5mm 不可运行。
+失败 fallback：mao 用 1.0mm；0.5mm 只给局部 crop。
+
+---
+
+## Week 12：ablation + baseline + 论文包
+
+**目标：** 形成可投/可答辩的实验包。
+
+任务：
+
+* baseline 1：planar slicing proxy（0.75 天）
+  文件：`scripts/baseline_planar.sh`
+  指标：layer count、support/collision/IK metrics
+  验收：至少 bunny/armadillo 可跑
+
+* baseline 2：geometric Dijkstra without IK（0.75 天）
+  文件：`scripts/baseline_no_ik.sh`
+  对比：`δ=0` vs `δ>0`
+  验收：能证明 IK-aware term 改变 IK metrics
+
+* baseline 3：v4 PDE / old method failure comparison（0.75 天）
+  文件：`scripts/baseline_v4_pde.sh`
+  验收：只做可视化失败对比，不作为唯一 baseline
+
+* ablation table（1 天）
+  固定 `αβγ`，消融：
+
+  ```text
+  δ=0, 0.25, 0.5, 1.0
+  no_clearance
+  no_curvature
+  no_ik
+  ```
+
+  产出：`ablation_table.csv`
+  验收：包含 coverage、broken layers、IK pass、collision fail、runtime
+
+* final report generator（0.75 天）
+  文件：`scripts/make_report.py`
+  产出：自动汇总表格和图
+  验收：一条命令生成论文实验图目录
+
+* 论文写作与限制章节（0.75 天）
+  文件：`paper/limitations.md`, `paper/method.md`
+  验收：明确写 soft field + post validation；mao 是 stress test
+
+风险：实验数量过多跑不完。
+失败 fallback：只保留 bunny + armadillo 的完整 ablation，mao 只给 stress test failure report。
+
+---
+
+# E. 权重与实验策略
+
+不要做 4D grid search。CLI #2 按这个顺序：
+
+```text
+Step 1:
+    α = 1.0, β = 0.3, γ = 0.1, δ = 0
+    跑 geometry-only
+
+Step 2:
+    固定 αβγ，只扫 δ:
+        δ = 0, 0.25, 0.5, 1.0
+
+Step 3:
+    选一个 δ*，做 ablation:
+        no_clearance
+        no_curvature
+        no_ik
+
+Step 4:
+    mao 不调参到成功，只报告失败定位
+```
+
+验收指标优先级：
+
+```text
+P0:
+    程序不崩
+    layer coverage
+    component count
+    IK pass rate
+    collision failure ratio
+    KRL OK segment length
+
+P1:
+    layer thickness error
+    support pass rate
+    curvature violation
+    runtime
+
+P2:
+    height-sweep correlation
+    silhouette similarity
+```
+
+---
+
+# F. 交付降级线
+
+12 周内必须有清晰降级，不然会拖死。
+
+## L4 full target
+
+```text
+bunny physical print or robot dry-run + extrusion
+armadillo full dry-run
+mao annotated stress test
+IK-aware scalar field ablation
+FCL validation
+KRL export
+```
+
+## L3 acceptable graduation target
+
+```text
+bunny full dry-run + small physical print
+armadillo dry-run with failure heatmap
+mao layers + failure heatmap only
+IK-aware ablation
+KRL export for bunny OK segment
+```
+
+## L2 emergency target
+
+```text
+bunny geometry layers + IK + KRL
+armadillo geometry layers + IK report
+mao only scalar field visualization
+no physical print, but robot dry-run video
+```
+
+## 必须避免的假成功
+
+```text
+不要生成完整 KRL 但中间有 IK_FAIL/COLLISION_FAIL
+不要删除小组件后报告 coverage 很高
+不要把 δ 调到层面变形严重还说 IK-aware 有效
+不要把 mao failure 写成 algorithm success
+不要把 SDF clearance 写成 FCL collision-free
+```
+
+---
+
+# 给 CLI #2 的最终执行指令
+
+1. **先跑通 geometry-only Dijkstra curved slicing，不接 IK。**
+   没有稳定 layers，不允许进入 IK DP。
+
+2. **`D_mm` 是唯一切片场。`D_norm` 只能可视化。**
+
+3. **IK-aware field 只做 pointwise margin。**
+   不能把它当路径级可行性证明。路径级可行性由 DP + validation 决定。
+
+4. **所有 constraints 都以后验 report 为准。**
+   Field 负责 bias，validator 负责判定。
+
+5. **所有失败都要落盘。**
+   `IK_FAIL`、`COLLISION_FAIL`、`BROKEN_LAYER`、`SING_RISK`、`VEL_FAIL` 都要有 index、位置、层号、路径号。
+
+6. **mao 的成功标准是完整失败定位报告，不是全 OK trajectory。**
+
+7. **physical print 只押一个小模型，不押 mao，不押完整 armadillo。**
+
+---
+
+## 最后判断
+
+v6 没有必须推翻的根本 conceptual flaw，但必须从“约束翻译成边权”改成：
+
+> **制造性加权 scalar field 生成候选曲面层；轨迹级 IK、support、collision、curvature 用后验验证判定；复杂模型输出 annotated infeasibility report。**
+
+这样写，10–12 周是 aggressive but executable。
+如果 CLI #2 严格按上面周计划做，优先保证 Week 2–6 的 geometry + IK dry-run 主链路，后面的 FCL、实机、mao、ablation 都有降级路径，毕业风险可控。
