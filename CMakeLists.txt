@@ -112,6 +112,15 @@ else()
     target_compile_options(curved_slicer_phase0 PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+add_executable(curved_slicer src/app/curved_slicer.cpp)
+target_link_libraries(curved_slicer PRIVATE curved_slicer_phase0)
+
+add_executable(toolpath_validate src/app/toolpath_validate.cpp)
+target_link_libraries(toolpath_validate PRIVATE curved_slicer_phase0)
+
+add_executable(export_krl src/app/export_krl.cpp)
+target_link_libraries(export_krl PRIVATE curved_slicer_phase0)
+
 enable_testing()
 
 function(configure_phase0_test target_name)
