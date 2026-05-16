@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>约束波前 + PDE 平滑算法可视化</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 24px;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    line-height: 1.6;
+  }
+  h1 {
+    color: #1d1d1f;
+    border-bottom: 3px solid #2a4a8a;
+    padding-bottom: 12px;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: #666;
+    margin-bottom: 32px;
+    font-size: 15px;
+  }
+  h2 {
+    color: #2a4a8a;
+    border-left: 4px solid #2a4a8a;
+    padding-left: 12px;
+    margin-top: 0;
+  }
+  h3 { margin-top: 0; }
+  .panel {
+    background: white;
+    padding: 24px;
+    margin: 20px 0;
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  }
+  .constraints {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+  @media (min-width: 980px) {
+    .constraints { grid-template-columns: repeat(4, 1fr); }
+  }
+  .constraint {
+    padding: 16px;
+    background: linear-gradient(135deg, #f0f4ff, #e8efff);
+    border-radius: 8px;
+    border-left: 4px solid #2a4a8a;
+  }
+  .constraint h3 {
+    margin: 0 0 8px;
+    color: #2a4a8a;
+    font-size: 16px;
+  }
+  .constraint .icon { font-size: 28px; margin-bottom: 8px; }
+  .constraint .desc { font-size: 13px; color: #444; }
+  .constraint svg { display: block; margin: 8px auto; }
+
+  .pipeline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .phase {
+    padding: 10px 14px;
+    background: #2a4a8a;
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .phase:hover { background: #1a3a7a; transform: translateY(-1px); }
+  .phase.active { background: #d35400; }
+  .phase .arrow {
+    color: #999;
+    margin: 0 4px;
+    font-size: 18px;
+  }
+  .arrow-sep { color: #999; font-size: 18px; }
+  .phase-detail {
+    display: none;
+    margin-top: 16px;
+    padding: 16px 20px;
+    background: #fef9e7;
+    border-radius: 8px;
+    border-left: 4px solid #d35400;
+  }
+  .phase-detail.active { display: block; }
+  .phase-detail h3 { color: #d35400; margin-top: 0; }
+  .phase-detail pre {
+    background: #2d2d2d;
+    color: #f0f0f0;
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .demo-container {
+    display: grid;
+    grid-template-columns: auto 320px;
+    gap: 24px;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .demo-container { grid-template-columns: 1fr; }
+  }
+  canvas {
+    border: 1px solid #ccc;
+    background: white;
+    border-radius: 6px;
+    display: block;
+  }
+  .controls {
+    padding: 16px;
+    background: #fafafa;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+  }
+  button {
+    padding: 8px 14px;
+    margin: 4px 4px 4px 0;
+    cursor: pointer;
+    background: #2a4a8a;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: #1a3a7a; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  .info-box {
+    padding: 12px;
+    background: white;
+    border-left: 3px solid #2a4a8a;
+    margin-top: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    min-height: 100px;
+    white-space: pre-wrap;
+    line-height: 1.5;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    margin: 6px 0;
+    font-size: 14px;
+  }
+  .stat-row b { font-family: "SF Mono", Menlo, monospace; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 12px;
+    background: #f9f9f9;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-color {
+    width: 18px;
+    height: 18px;
+    border: 1px solid #888;
+    border-radius: 3px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+    font-size: 14px;
+  }
+  th, td {
+    padding: 10px;
+    border: 1px solid #ddd;
+    text-align: left;
+  }
+  th { background: #f0f4ff; color: #2a4a8a; }
+  tr:nth-child(even) { background: #fafafa; }
+  .pass { color: #2a7a2a; font-weight: bold; }
+  .fail { color: #aa2222; font-weight: bold; }
+  .neutral { color: #666; }
+  .step-narration {
+    background: #eef7e7;
+    border-left: 4px solid #2a7a2a;
+    padding: 10px 14px;
+    margin-top: 12px;
+    font-size: 13px;
+  }
+  .rescue-narration {
+    background: #fef0e0;
+    border-left: 4px solid #d35400;
+    padding: 10px 14px;
+    margin-top: 12px;
+    font-size: 13px;
+  }
+  .formula {
+    background: #f5f5f5;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    margin: 6px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>约束波前 + PDE 平滑算法可视化</h1>
+<p class="subtitle">为 KUKA KR4 R600 六轴 FDM 曲面打印设计，同时满足 support-free / 曲率不干涉 / 收敛三大约束</p>
+
+<!-- Part 1: 四条约束 -->
+<div class="panel">
+  <h2>Part 1：四条根本约束</h2>
+  <p style="margin-top: 0;">任何"层 N+1 可打印于层 N 之上"必须同时满足下面 4 条。少一条都会出问题。</p>
+  <div class="constraints">
+
+    <div class="constraint">
+      <div class="icon">🧱</div>
+      <h3>C1 ASN 结构</h3>
+      <svg width="120" height="100" viewBox="0 0 120 100">
+        <rect x="20" y="20" width="20" height="20" fill="#4a7ac8" stroke="#1a3a7a"/>
+        <rect x="40" y="20" width="20" height="20" fill="#4a7ac8" stroke="#1a3a7a"/>
+        <rect x="60" y="20" width="20" height="20" fill="#4a7ac8" stroke="#1a3a7a"/>
+        <rect x="40" y="40" width="20" height="20" fill="#ffd700" stroke="#aa6600" stroke-width="2"/>
+        <text x="50" y="55" font-size="11" text-anchor="middle">v</text>
+        <text x="50" y="14" font-size="10" text-anchor="middle" fill="#1a3a7a">已打印（L_{k-1}）</text>
+        <text x="50" y="78" font-size="10" text-anchor="middle" fill="#aa6600">新加 v 需有 1 个 ASN 已打印</text>
+      </svg>
+      <div class="desc">新体素 v 必须至少有 1 个 ASN（18 邻居：6 面 + 12 棱）在已打印集合里。这样新材料能黏住前层。</div>
+    </div>
+
+    <div class="constraint">
+      <div class="icon">🦾</div>
+      <h3>C2 IK 可达</h3>
+      <svg width="120" height="100" viewBox="0 0 120 100">
+        <circle cx="20" cy="80" r="6" fill="#333"/>
+        <line x1="20" y1="80" x2="50" y2="40" stroke="#666" stroke-width="3"/>
+        <line x1="50" y1="40" x2="80" y2="50" stroke="#666" stroke-width="3"/>
+        <line x1="80" y1="50" x2="90" y2="35" stroke="#666" stroke-width="3"/>
+        <circle cx="90" cy="35" r="4" fill="#d35400"/>
+        <text x="60" y="95" font-size="10" text-anchor="middle" fill="#333">关节 + 限位 + 奇异性</text>
+      </svg>
+      <div class="desc">在该位姿 (X,Y,Z + 朝向)，IK 必须解得出 6 关节角，且都在 qlim 内，远离奇异区，在工作空间内。</div>
+    </div>
+
+    <div class="constraint">
+      <div class="icon">⚠️</div>
+      <h3>C3 喷头不撞</h3>
+      <svg width="120" height="100" viewBox="0 0 120 100">
+        <rect x="50" y="20" width="20" height="35" fill="#888" stroke="#333"/>
+        <circle cx="60" cy="58" r="3" fill="#d35400"/>
+        <rect x="20" y="65" width="80" height="25" fill="#a5d6a7" stroke="#2e7d32"/>
+        <text x="60" y="80" font-size="10" text-anchor="middle">已打印</text>
+        <text x="60" y="14" font-size="10" text-anchor="middle" fill="#d35400">喷头身体</text>
+      </svg>
+      <div class="desc">喷头是圆柱体（半径 r，高 h），从 TCP 沿 -tool_z 方向延伸。圆柱不能撞已打印部分。</div>
+    </div>
+
+    <div class="constraint">
+      <div class="icon">🔄</div>
+      <h3>C4 曲率不干涉</h3>
+      <svg width="120" height="100" viewBox="0 0 120 100">
+        <path d="M 10 80 Q 30 30 60 80 Q 90 30 110 80" stroke="#2e7d32" stroke-width="2" fill="none"/>
+        <circle cx="30" cy="55" r="8" fill="#ffcdd2" stroke="#c62828"/>
+        <circle cx="90" cy="55" r="8" fill="#ffcdd2" stroke="#c62828"/>
+        <text x="60" y="20" font-size="10" text-anchor="middle" fill="#c62828">喷头半径 &lt; 凹陷半径</text>
+        <text x="60" y="98" font-size="10" text-anchor="middle">曲面</text>
+      </svg>
+      <div class="desc">曲面每点曲率 |H| &lt; 1/r_nozzle。否则喷头塞不进凹陷，物理上不可打印。</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Part 2: Pipeline -->
+<div class="panel">
+  <h2>Part 2：算法 Pipeline 概览（点击 Phase 查看细节）</h2>
+  <div class="pipeline">
+    <div class="phase" data-phase="A">Phase A<br>预处理</div>
+    <span class="arrow-sep">→</span>
+    <div class="phase" data-phase="B">Phase B<br>约束波前推进</div>
+    <span class="arrow-sep">→</span>
+    <div class="phase" data-phase="B5">Phase B.5<br>救援机制</div>
+    <span class="arrow-sep">→</span>
+    <div class="phase" data-phase="C">Phase C<br>PDE 后平滑</div>
+    <span class="arrow-sep">→</span>
+    <div class="phase" data-phase="D">Phase D<br>等值面+验证</div>
+    <span class="arrow-sep">→</span>
+    <div class="phase" data-phase="E">Phase E<br>路径+轨迹</div>
+  </div>
+
+  <div class="phase-detail" id="phase-A">
+    <h3>Phase A：预处理</h3>
+    <ul>
+      <li><b>A1</b>：把 STL 切成立方体素（默认 spacing=0.5mm）</li>
+      <li><b>A2</b>：算每个 voxel 的 SDF（到表面距离）</li>
+      <li><b>A3</b>：算每个 voxel 表面的<b>曲率 H(v)</b>（SDF Hessian 特征值估）</li>
+      <li><b>A4</b>：标"先天不可救"体素：|H(v)| &gt; 1/r_nozzle 直接打 SHADOW</li>
+      <li><b>A5</b>：解 G 场（每 voxel 的工件外法向）—— 仅用于后续工具姿态，不用于推进</li>
+    </ul>
+    <div class="info-box">输出：每 voxel 有 SDF + 曲率 + G 方向；SHADOW 体素已标</div>
+  </div>
+
+  <div class="phase-detail" id="phase-B">
+    <h3>Phase B：约束波前推进（算法核心）</h3>
+    <p>从平台开始，一层一层往外推。<b>每个候选 voxel 必须同时通过 C1+C2+C3+C4 才能加入下一层</b>。</p>
+    <pre>L_1 = 平台贴附体素 (geometric_z 内 bottom band)
+processed = L_1
+layer_idx = 1
+
+while unprocessed 非空:
+    candidates = {}
+    for v in L_layer_idx:
+        for v_a in ASN(v):              # 18 个邻居方向
+            if v_a 已处理: continue
+            if not C1(v_a, processed): continue   # 至少 1 个 ASN 已处理
+            if not C2(v_a, G(v_a)): continue       # IK 可达
+            if not C3(v_a, processed): continue    # 喷头不撞
+            if not C4(v_a): continue              # 曲率 OK
+            candidates.add(v_a)
+
+    if candidates 空:
+        触发 Phase B.5 救援
+    else:
+        # 精选：按 G 投影距离 + 单连通分量
+        L_next = select_thin_connected(candidates)
+        processed ∪= L_next
+        layer_idx += 1</pre>
+    <div class="info-box">输出：每个 voxel 都有整数层号 L(v) ∈ {1, ..., K}，构造保证 C1~C4</div>
+  </div>
+
+  <div class="phase-detail" id="phase-B5">
+    <h3>Phase B.5：救援机制</h3>
+    <p>当 candidates 空，但还有未处理 voxel 时，按梯度放宽约束：</p>
+    <ol>
+      <li><b>Step 1</b>：放宽 C4 阈值 1.2× —— 喷头能塞 r/1.2 半径的凹陷</li>
+      <li><b>Step 2</b>：放宽 C3 margin 0.8× —— 安全距离从 5mm 减到 4mm</li>
+      <li><b>Step 3</b>：仍空 → 当前 unprocessed voxel 标记 SHADOW，跳到下层继续</li>
+      <li><b>Step 4</b>：累计 SHADOW 率 &gt; 30% → 算法失败 abort</li>
+    </ol>
+    <div class="info-box">收敛性证明：每次循环要么推进 ≥1 voxel，要么消耗 ≥1 voxel 为 SHADOW。
+unprocessed 集合单调减小 → 有限步终止</div>
+  </div>
+
+  <div class="phase-detail" id="phase-C">
+    <h3>Phase C：PDE 后平滑</h3>
+    <p>Phase B 输出整数层 L(v)，直接切等值面会有 voxel 锯齿。用 Poisson 后平滑：</p>
+    <div class="formula">
+      φ_target(v) = L(v) / max(L)  ∈ [0, 1]<br>
+      <br>
+      minimize  ∫(|∇φ|² + λ·|φ - φ_target|²) dV<br>
+      subject to  φ(bottom)=0,  φ(top)=1
+    </div>
+    <p><b>自适应 λ</b>：每层 λ 由 ASN 满足率决定 —— 结构紧绷的层用大 λ（严格跟 L），结构松的用小 λ（PDE 主导平滑）。</p>
+    <div class="info-box">输出：光滑 φ 场，iso-surfaces 不再有 voxel 锯齿，但拓扑（层数 + 连通性）由 Phase B 保证</div>
+  </div>
+
+  <div class="phase-detail" id="phase-D">
+    <h3>Phase D：等值面提取 + 验证</h3>
+    <ul>
+      <li><b>D1</b>：MC 提取等值面 at uniform φ spacing (0.1, 0.2, ..., 0.9)</li>
+      <li><b>D2</b>：§20 连通性过滤（每层最大连通分量）</li>
+      <li><b>D3</b>：§21 ASN per-vertex 二次验证（应近 100% 通过）</li>
+      <li><b>D4</b>：任一层失败率 &gt; 5% → 算法 abort</li>
+    </ul>
+  </div>
+
+  <div class="phase-detail" id="phase-E">
+    <h3>Phase E：路径生成 + 6 轴轨迹</h3>
+    <p>这部分沿用 v4 §13/§11/§12/§14：</p>
+    <ul>
+      <li><b>E1</b>：测地等值线提取路径（libigl exact_geodesic + isolines）</li>
+      <li><b>E2</b>：笛卡尔位姿构造 + KR4 R600 解析 IK</li>
+      <li><b>E3</b>：可达性双层过滤（B 体素级 + C 路径点级）</li>
+      <li><b>E4</b>：5 次多项式关节角轨迹平滑（4ms 周期对齐 RSI）</li>
+    </ul>
+    <div class="info-box">最终输出：trajectory.csv（每帧 6 关节角 + wire_on + PLC 信号）</div>
+  </div>
+</div>
+
+<!-- Part 3: 互动演示 -->
+<div class="panel">
+  <h2>Part 3：Phase B 互动演示（2D 简化）</h2>
+  <p>下面用一个 2D 头像简化模型演示算法。点击 "Next Step" 看每一步如何推进。</p>
+  <div class="demo-container">
+    <div>
+      <canvas id="grid" width="500" height="600"></canvas>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-color" style="background: #f0f0f0;"></div>外部</div>
+        <div class="legend-item"><div class="legend-color" style="background: #dddddd;"></div>未处理</div>
+        <div class="legend-item"><div class="legend-color" style="background: #ffcccc;"></div>高曲率（C4 风险）</div>
+        <div class="legend-item"><div class="legend-color" style="background: #ffd700;"></div>当前层候选</div>
+        <div class="legend-item"><div class="legend-color" style="background: hsl(240, 60%, 55%);"></div>L_1</div>
+        <div class="legend-item"><div class="legend-color" style="background: hsl(180, 60%, 55%);"></div>L_5</div>
+        <div class="legend-item"><div class="legend-color" style="background: hsl(120, 60%, 55%);"></div>L_10</div>
+        <div class="legend-item"><div class="legend-color" style="background: hsl(60, 60%, 55%);"></div>L_15</div>
+        <div class="legend-item"><div class="legend-color" style="background: #cc3333;"></div>SHADOW</div>
+      </div>
+    </div>
+    <div class="controls">
+      <h3 style="margin-top: 0;">控制</h3>
+      <button id="btn-step">Next Step</button>
+      <button id="btn-auto">Auto Play</button>
+      <button id="btn-reset">Reset</button>
+      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #ddd;">
+        <div class="stat-row">当前层：<b id="layer-count">1</b></div>
+        <div class="stat-row">已处理：<b id="processed-count">0</b></div>
+        <div class="stat-row">候选数：<b id="candidate-count">0</b></div>
+        <div class="stat-row">SHADOW：<b id="shadow-count">0</b></div>
+        <div class="stat-row">总 voxel：<b id="total-count">0</b></div>
+      </div>
+      <div class="info-box" id="info">点击 Next Step 开始</div>
+    </div>
+  </div>
+</div>
+
+<!-- Part 4: 对比 -->
+<div class="panel">
+  <h2>Part 4：与现有方法对比</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>维度</th>
+        <th>v4 当前（纯 PDE）</th>
+        <th>Wang 2018（贪婪 ASN）</th>
+        <th>新算法（约束波前 + PDE）</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>层构造方式</td>
+        <td>解 ∇²φ = ∇·G + 切等值面</td>
+        <td>构造式贪婪推进</td>
+        <td>构造式 + PDE 后平滑</td>
+      </tr>
+      <tr>
+        <td>C1 ASN</td>
+        <td class="fail">❌ 无保证</td>
+        <td class="pass">✅ 构造保证</td>
+        <td class="pass">✅ 构造保证</td>
+      </tr>
+      <tr>
+        <td>C2 IK 可达</td>
+        <td class="neutral">事后 §12 筛</td>
+        <td class="fail">❌ 没考虑</td>
+        <td class="pass">✅ 构造时检查</td>
+      </tr>
+      <tr>
+        <td>C3 喷头不撞</td>
+        <td class="neutral">事后 §17 筛</td>
+        <td class="neutral">凸包近似</td>
+        <td class="pass">✅ 构造时检查</td>
+      </tr>
+      <tr>
+        <td>C4 曲率</td>
+        <td class="fail">❌ 没考虑</td>
+        <td class="fail">❌ 没考虑</td>
+        <td class="pass">✅ 构造时检查</td>
+      </tr>
+      <tr>
+        <td>收敛保证</td>
+        <td>PDE 线性求解</td>
+        <td>部分（shadow region 失败）</td>
+        <td class="pass">✅ 有限步 + 显式失败标记</td>
+      </tr>
+      <tr>
+        <td>复杂几何（mao）</td>
+        <td class="fail">严重碎裂</td>
+        <td class="neutral">部分 shadow</td>
+        <td class="neutral">头发处可能 SHADOW，主体 OK</td>
+      </tr>
+      <tr>
+        <td>等值面光滑度</td>
+        <td class="neutral">PDE 平滑（但可能错）</td>
+        <td class="fail">voxel 锯齿</td>
+        <td class="pass">PDE 平滑后处理</td>
+      </tr>
+      <tr>
+        <td>工程复杂度</td>
+        <td>基线</td>
+        <td>+~1000 LOC</td>
+        <td>+~1350 LOC</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+// ===== 2D 演示状态 =====
+const COLS = 25;
+const ROWS = 30;
+const CELL = 18;
+
+const canvas = document.getElementById('grid');
+canvas.width = COLS * CELL + 2;
+canvas.height = ROWS * CELL + 2;
+const ctx = canvas.getContext('2d');
+
+let grid = [];   // 'inside' / 'outside'
+let layers = []; // 0 = unprocessed, >0 = layer index, -1 = SHADOW
+let currentLayer = 1;
+let candidateCells = [];  // 当前步显示为"候选"的 cells
+let autoTimer = null;
+
+// 几何：一个简化的 2D 头像剖面（颈+头）
+function isInside(c, r) {
+  // 颈部：rows 0-5, cols 10-14
+  if (r <= 5 && c >= 10 && c <= 14) return true;
+  // 头部：圆心 (12, 16), 半径 9
+  const dx = c - 12, dy = r - 16;
+  if (dx * dx + dy * dy <= 81) return true;
+  // 额外凹陷模拟"耳朵后面"细节
+  if (r >= 17 && r <= 19 && (c === 2 || c === 22)) return true;
+  return false;
+}
+
+// 几个 voxel 标为高曲率（模拟 C4 风险点）
+function isHighCurvature(c, r) {
+  // 颈-头交界处的尖角
+  if (r === 6 && (c === 9 || c === 15)) return true;
+  if (r === 7 && (c === 8 || c === 16)) return true;
+  // 耳朵根部的尖凹
+  if (r === 16 && (c === 3 || c === 21)) return true;
+  return false;
+}
+
+// 2D ASN: 8 邻居（4 面 + 4 棱）
+function asn(c, r) {
+  return [
+    [c - 1, r], [c + 1, r], [c, r - 1], [c, r + 1],         // 面 (L1=1)
+    [c - 1, r - 1], [c + 1, r - 1], [c - 1, r + 1], [c + 1, r + 1] // 棱 (L1=2)
+  ];
+}
+
+function totalInsideVoxels() {
+  let n = 0;
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (grid[r][c] === 'inside') n++;
+  return n;
+}
+
+function processedCount() {
+  let n = 0;
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (layers[r][c] > 0) n++;
+  return n;
+}
+
+function shadowCount() {
+  let n = 0;
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (layers[r][c] === -1) n++;
+  return n;
+}
+
+function reset() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  document.getElementById('btn-auto').textContent = 'Auto Play';
+  grid = [];
+  layers = [];
+  for (let r = 0; r < ROWS; r++) {
+    grid[r] = [];
+    layers[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      grid[r][c] = isInside(c, r) ? 'inside' : 'outside';
+      layers[r][c] = 0;
+    }
+  }
+  // L_1 = 最底一行的内部体素（平台贴附）
+  for (let c = 0; c < COLS; c++) {
+    if (grid[0][c] === 'inside') layers[0][c] = 1;
+  }
+  currentLayer = 1;
+  candidateCells = [];
+  updateStats();
+  setInfo('Reset. L_1 = 颈底体素（平台贴附）。点击 Next Step 推进。');
+  draw();
+}
+
+function step() {
+  if (candidateCells.length > 0) {
+    // 第二步：把候选实际加入下层
+    currentLayer++;
+    for (const [c, r] of candidateCells) {
+      layers[r][c] = currentLayer;
+    }
+    setInfo(`✓ 第 ${currentLayer} 层加入 ${candidateCells.length} 个 voxel。\n` +
+            `它们都通过了 C1 (ASN) + C4 (曲率) 检查。\n` +
+            `(C2/C3 在 2D 演示里简化省略)`);
+    candidateCells = [];
+    updateStats();
+    draw();
+    return;
+  }
+  // 第一步：找候选
+  const cands = [];
+  const rejectedC4 = [];  // C4 fail 的（让用户看到救援触发）
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (layers[r][c] !== currentLayer) continue;
+      for (const [nc, nr] of asn(c, r)) {
+        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+        if (grid[nr][nc] !== 'inside') continue;
+        if (layers[nr][nc] !== 0) continue;
+        // C1: ASN 已自动满足（我们就是从已处理 v 走到 v_a 的）
+        // C4: 曲率
+        if (isHighCurvature(nc, nr)) {
+          rejectedC4.push([nc, nr]);
+          continue;
+        }
+        // 去重
+        if (!cands.some(([cc, rr]) => cc === nc && rr === nr)) {
+          cands.push([nc, nr]);
+        }
+      }
+    }
+  }
+  if (cands.length === 0) {
+    // 触发救援：如果 rejectedC4 有内容，放宽 C4 重试
+    if (rejectedC4.length > 0) {
+      setInfo(`⚠️ Phase B.5 触发！\n` +
+              `当前层无候选满足 C4 曲率约束。\n` +
+              `Step 1: 放宽 C4 阈值 1.2× → 接受 ${rejectedC4.length} 个边缘 voxel\n` +
+              `(下次点 Next Step 把它们加入下层)`);
+      // 接受被 C4 拒绝的
+      candidateCells = rejectedC4;
+      updateStats();
+      draw();
+      return;
+    }
+    // 实在没救
+    let shadowed = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (grid[r][c] === 'inside' && layers[r][c] === 0) {
+          layers[r][c] = -1;
+          shadowed++;
+        }
+      }
+    }
+    setInfo(`🛑 算法终止。\n` +
+            `${shadowed} 个剩余 voxel 标记为 SHADOW（无法 ASN 推进）。\n` +
+            `如果是 mao 模型，这些是头发深褶皱里的"unreachable region"。\n` +
+            `总层数：${currentLayer}, 总 voxel：${totalInsideVoxels()}, ` +
+            `SHADOW 率：${(shadowed / totalInsideVoxels() * 100).toFixed(1)}%`);
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; document.getElementById('btn-auto').textContent = 'Auto Play'; }
+    updateStats();
+    draw();
+    return;
+  }
+  candidateCells = cands;
+  setInfo(`Step 1: L_${currentLayer} 的 ${asnCount()} 个 ASN 中找到 ${cands.length} 个候选。\n` +
+          `所有候选都通过 C1 (ASN 已满足) + C4 (曲率 OK)。\n` +
+          `下次点 Next Step 把候选加入下层 L_${currentLayer + 1}。\n` +
+          `（黄色高亮 = 当前候选）`);
+  updateStats();
+  draw();
+}
+
+function asnCount() {
+  // 估计 L_currentLayer 体素的 ASN 总数（用于显示）
+  let total = 0;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (layers[r][c] !== currentLayer) continue;
+      for (const [nc, nr] of asn(c, r)) {
+        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+        if (grid[nr][nc] === 'inside' && layers[nr][nc] === 0) total++;
+      }
+    }
+  }
+  return total;
+}
+
+function setInfo(msg) {
+  document.getElementById('info').textContent = msg;
+}
+
+function updateStats() {
+  document.getElementById('layer-count').textContent = currentLayer;
+  document.getElementById('processed-count').textContent = processedCount();
+  document.getElementById('candidate-count').textContent = candidateCells.length;
+  document.getElementById('shadow-count').textContent = shadowCount();
+  document.getElementById('total-count').textContent = totalInsideVoxels();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // 候选标记 set 加速查找
+  const candSet = new Set(candidateCells.map(([c, r]) => `${c},${r}`));
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = c * CELL + 1;
+      const y = (ROWS - 1 - r) * CELL + 1;  // 翻转 y 让底在下
+      let color, border = '#888';
+      if (grid[r][c] === 'outside') {
+        color = '#f0f0f0';
+      } else if (candSet.has(`${c},${r}`)) {
+        color = '#ffd700';
+        border = '#aa6600';
+      } else if (layers[r][c] === -1) {
+        color = '#cc3333';
+        border = '#882222';
+      } else if (layers[r][c] === 0) {
+        color = isHighCurvature(c, r) ? '#ffcccc' : '#dddddd';
+      } else {
+        const t = (layers[r][c] - 1) / 20;
+        const hue = (240 - t * 200 + 360) % 360;
+        color = `hsl(${hue}, 60%, 55%)`;
+      }
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, CELL - 1, CELL - 1);
+      ctx.strokeStyle = border;
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(x + 0.5, y + 0.5, CELL - 2, CELL - 2);
+      // 在 voxel 上画层号
+      if (layers[r][c] > 0 && CELL >= 16) {
+        ctx.fillStyle = '#000';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(layers[r][c], x + CELL / 2, y + CELL / 2);
+      }
+    }
+  }
+  // 画平台
+  const platformY = (ROWS - 1) * CELL + 1 + CELL;
+  ctx.fillStyle = '#444';
+  ctx.fillRect(0, platformY - 4, canvas.width, 4);
+}
+
+document.getElementById('btn-step').addEventListener('click', step);
+document.getElementById('btn-reset').addEventListener('click', reset);
+document.getElementById('btn-auto').addEventListener('click', () => {
+  if (autoTimer) {
+    clearInterval(autoTimer);
+    autoTimer = null;
+    document.getElementById('btn-auto').textContent = 'Auto Play';
+  } else {
+    document.getElementById('btn-auto').textContent = 'Stop';
+    autoTimer = setInterval(step, 400);
+  }
+});
+
+// Phase 详情切换
+document.querySelectorAll('.phase').forEach(el => {
+  el.addEventListener('click', () => {
+    const phaseId = el.dataset.phase;
+    const detail = document.getElementById(`phase-${phaseId}`);
+    const wasActive = detail.classList.contains('active');
+    document.querySelectorAll('.phase').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.phase-detail').forEach(p => p.classList.remove('active'));
+    if (!wasActive) {
+      el.classList.add('active');
+      detail.classList.add('active');
+    }
+  });
+});
+
+// 初始化
+reset();
+</script>
+
+</body>
+</html>

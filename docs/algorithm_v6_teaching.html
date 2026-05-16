@@ -1,0 +1,1448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v6.2 算法教学：核心场与惩罚项的推导</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Source Han Serif SC",
+                 "Songti SC", "Microsoft YaHei", serif;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px;
+    background: #fafaf7;
+    color: #1f1f1f;
+    line-height: 1.75;
+  }
+  h1 {
+    color: #1a1a1a;
+    border-bottom: 3px double #3a5a8a;
+    padding-bottom: 14px;
+    font-size: 28px;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    color: #777;
+    font-size: 15px;
+    margin-bottom: 36px;
+    font-style: italic;
+  }
+  h2 {
+    color: #2a4a8a;
+    border-left: 5px solid #2a4a8a;
+    padding-left: 14px;
+    margin-top: 56px;
+    font-size: 22px;
+  }
+  h3 {
+    color: #444;
+    margin-top: 36px;
+    font-size: 18px;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 6px;
+  }
+  h4 {
+    color: #555;
+    font-size: 16px;
+    margin-top: 24px;
+    margin-bottom: 8px;
+  }
+  p { margin: 12px 0; }
+  .goal {
+    background: linear-gradient(135deg, #e8f0ff, #f0f4ff);
+    border-left: 4px solid #2a4a8a;
+    padding: 14px 18px;
+    margin: 16px 0;
+    border-radius: 6px;
+    font-size: 15px;
+  }
+  .goal::before {
+    content: "🎯 ";
+  }
+  .why {
+    background: #fff8dc;
+    border-left: 4px solid #d4a017;
+    padding: 14px 18px;
+    margin: 16px 0;
+    border-radius: 6px;
+  }
+  .why-title {
+    font-weight: bold;
+    color: #a07a00;
+    margin-bottom: 8px;
+  }
+  .warn {
+    background: #fff0f0;
+    border-left: 4px solid #c94545;
+    padding: 14px 18px;
+    margin: 16px 0;
+    border-radius: 6px;
+  }
+  .warn-title {
+    font-weight: bold;
+    color: #a02a2a;
+    margin-bottom: 8px;
+  }
+  .think {
+    background: #f0f7ff;
+    border-left: 4px solid #5a8ac4;
+    padding: 14px 18px;
+    margin: 16px 0;
+    border-radius: 6px;
+  }
+  .think-title {
+    font-weight: bold;
+    color: #2a5a94;
+    margin-bottom: 8px;
+  }
+  .formula {
+    background: #f5f0ea;
+    border: 1px solid #d4c9b8;
+    padding: 18px 24px;
+    margin: 18px 0;
+    border-radius: 6px;
+    font-family: "Cambria Math", "Latin Modern Math", "Source Han Serif SC", serif;
+    font-size: 17px;
+    text-align: center;
+    overflow-x: auto;
+  }
+  .formula-label {
+    text-align: right;
+    color: #888;
+    font-size: 13px;
+    margin-top: 6px;
+    font-family: sans-serif;
+  }
+  .step-list {
+    counter-reset: step-counter;
+    list-style: none;
+    padding-left: 0;
+  }
+  .step-list > li {
+    counter-increment: step-counter;
+    padding: 12px 16px 12px 48px;
+    margin: 10px 0;
+    background: #f8f8f3;
+    border-radius: 6px;
+    border-left: 3px solid #6a8aaa;
+    position: relative;
+  }
+  .step-list > li::before {
+    content: "第 " counter(step-counter) " 步";
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    background: #6a8aaa;
+    color: white;
+    padding: 2px 8px;
+    font-size: 12px;
+    border-radius: 4px;
+    font-weight: bold;
+    width: 32px;
+    text-align: center;
+  }
+  .step-list > li > .step-content {
+    margin-left: 36px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 18px 0;
+    font-size: 15px;
+  }
+  th {
+    background: #e8f0fa;
+    color: #2a4a8a;
+    padding: 10px;
+    text-align: left;
+    border: 1px solid #c4d4e8;
+  }
+  td {
+    padding: 10px;
+    border: 1px solid #ddd;
+  }
+  tr:nth-child(even) td { background: #fafafa; }
+  code {
+    background: #f0eee5;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    color: #5a3a1a;
+  }
+  pre {
+    background: #2c2c2c;
+    color: #f0f0f0;
+    padding: 14px 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    line-height: 1.5;
+    font-size: 13px;
+  }
+  .var {
+    font-style: italic;
+    color: #2a4a8a;
+  }
+  .number-eg {
+    background: #f0f7e8;
+    border-left: 4px solid #6a9a3a;
+    padding: 12px 16px;
+    margin: 14px 0;
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  .number-eg::before {
+    content: "🔢 数值示例：";
+    font-weight: bold;
+    color: #4a7a2a;
+  }
+  .toc {
+    background: #f0f4ff;
+    border: 1px solid #c4d4e8;
+    padding: 18px 24px;
+    border-radius: 6px;
+    margin: 24px 0 40px;
+  }
+  .toc h3 { margin-top: 0; border: none; color: #2a4a8a; }
+  .toc ol { line-height: 1.9; }
+  .toc a { color: #2a4a8a; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  svg { display: block; margin: 16px auto; }
+  .diagram-caption {
+    text-align: center;
+    color: #777;
+    font-size: 13px;
+    font-style: italic;
+    margin-top: -8px;
+    margin-bottom: 16px;
+  }
+  .chapter-summary {
+    background: #f5f5fa;
+    border: 2px solid #c0c0d0;
+    padding: 18px 24px;
+    border-radius: 8px;
+    margin: 32px 0 16px;
+  }
+  .chapter-summary h4 {
+    margin-top: 0;
+    color: #4a4a6a;
+  }
+</style>
+</head>
+<body>
+
+<h1>v6.2 算法教学课件</h1>
+<p class="subtitle">核心场与惩罚项的推导式讲解</p>
+
+<div class="goal">
+本课件目标：让你完全理解 v6.2 算法第一阶段（基础场预计算）和第二阶段（加权最短路径距离场）<strong>每一个场是怎么算的、每一个惩罚项怎么定义的、为什么这样设计</strong>。读完后你应该能自己跟同学讲清楚整套思路。
+</div>
+
+<div class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#intro">导论：为什么要把可制造性翻译成"边权"</a></li>
+    <li><a href="#fields">第一节：四个基础场（先把"地形"算清楚）</a>
+      <ol>
+        <li><a href="#sdf">1.1 符号距离场</a></li>
+        <li><a href="#cavity">1.2 局部开口半径场</a></li>
+        <li><a href="#curv">1.3 最大主曲率场</a></li>
+        <li><a href="#normal">1.4 平滑法向场</a></li>
+      </ol>
+    </li>
+    <li><a href="#penalties">第二节：四个惩罚项（把"难加工"翻译成数字）</a>
+      <ol>
+        <li><a href="#p_clear">2.1 凹陷风险惩罚</a></li>
+        <li><a href="#p_orient">2.2 朝向偏离惩罚（融合式偏好方向）</a></li>
+        <li><a href="#p_curv">2.3 曲率违反惩罚</a></li>
+        <li><a href="#p_ik">2.4 逆运动学边际惩罚（含分支一致性）</a></li>
+      </ol>
+    </li>
+    <li><a href="#norm">第三节：惩罚项归一化（消除量纲混乱）</a></li>
+    <li><a href="#dijkstra">第四节：加权最短路径距离场（核心方程）</a></li>
+    <li><a href="#smoothing">第五节：有界平滑（消除体素锯齿）</a></li>
+    <li><a href="#tool_pose">第六节：工具姿态估计（为逆运动学准备）</a></li>
+  </ol>
+</div>
+
+<!-- ============== 导论 ============== -->
+<h2 id="intro">导论：为什么要把可制造性翻译成"边权"</h2>
+
+<div class="goal">
+本节学完后你应该能回答：为什么我们放弃了偏微分方程路线，转向"在体素图上做最短路径"。
+</div>
+
+<h3>问题回顾</h3>
+
+<p>我们的输入是一个三维模型（如毛主席头雕），目标是切成一层一层的弯曲薄壳，让六轴机器人不需要任何支撑就能打印出来。</p>
+
+<p>任何曲面层切片算法必须同时满足四件事：</p>
+
+<table>
+<thead>
+<tr><th>编号</th><th>名称</th><th>含义</th></tr>
+</thead>
+<tbody>
+<tr><td>C1</td><td>邻接粘合</td><td>每个新体素必须有"贴得住的邻居"在前层（粘得住的物理条件）</td></tr>
+<tr><td>C2</td><td>机器人能摸到</td><td>逆运动学有解 + 关节不越限 + 远离奇异点</td></tr>
+<tr><td>C3</td><td>喷头本体不撞</td><td>喷头圆柱体不能撞到已打印部分</td></tr>
+<tr><td>C4</td><td>曲面不太弯</td><td>表面最大主曲率不能超过喷头半径倒数（喷头塞得进凹陷）</td></tr>
+</tbody>
+</table>
+
+<h3>失败的两条老路</h3>
+
+<div class="why">
+<div class="why-title">为什么不用偏微分方程？</div>
+我们之前 v4 走的是"解 ∇²φ = ∇·G + 切等值面"的偏微分方程路线。这条路对兔子这种简单凸几何能跑，但对毛主席头雕<strong>必然崩</strong>，根本原因：脸的法向指 +X、后脑勺指 −X、头顶指 +Z，这个法向场有"漩涡"（数学上叫 curl ≠ 0），偏微分方程根本无法用单一标量场 φ 表达这种漩涡。
+</div>
+
+<div class="why">
+<div class="why-title">为什么不用 Wang 2018 的贪婪推进？</div>
+Wang 2018 的"贪婪邻接推进"是构造式的：从平台开始一格一格往外加体素，只要新体素有邻居在前层就接受。这条路保证了 C1，但完全不考虑 C2/C3/C4。论文自己也承认对 Armadillo 尾根有 10752 个体素永远到不了（叫"阴影区"失败）。
+</div>
+
+<h3>v6.2 的新思路：把四个约束统统翻译成"边权"</h3>
+
+<p>关键转变：</p>
+
+<p><strong>不要求场上每一点都严格满足 C1-C4，但让"难加工"的位置在算法层面"代价更高"，于是最短路径会自然绕开它们</strong>。</p>
+
+<svg width="700" height="200" viewBox="0 0 700 200">
+  <!-- 模型轮廓 -->
+  <path d="M 100 150 Q 250 50 400 80 Q 550 100 650 150 L 650 180 L 100 180 Z"
+        fill="#e8efff" stroke="#2a4a8a" stroke-width="2"/>
+  <!-- 易加工区域 -->
+  <rect x="200" y="115" width="80" height="40" fill="#d0e8d0" opacity="0.7"/>
+  <text x="240" y="139" text-anchor="middle" font-size="11" fill="#4a7a2a">易加工 ✓</text>
+  <!-- 难加工区域 -->
+  <rect x="400" y="80" width="80" height="40" fill="#f8d0d0" opacity="0.7"/>
+  <text x="440" y="103" text-anchor="middle" font-size="11" fill="#a03030">难加工 ✗</text>
+  <!-- Dijkstra 路径 -->
+  <path d="M 150 170 Q 250 145 350 145 Q 400 145 450 165 Q 500 175 580 170"
+        stroke="#d35400" stroke-width="2" fill="none" stroke-dasharray="4,4"/>
+  <circle cx="150" cy="170" r="4" fill="#d35400"/>
+  <text x="155" y="195" font-size="10" fill="#d35400">起点（底部）</text>
+  <text x="450" y="135" font-size="10" fill="#d35400">最短路径自然绕开</text>
+</svg>
+<p class="diagram-caption">图示：最短路径在"易加工"区域穿过，自然避开"难加工"区域（橙色虚线 = 加权距离场的最短路径）</p>
+
+<div class="think">
+<div class="think-title">这个思路有什么深刻之处？</div>
+我们把"是否可加工"的问题，从<strong>布尔判定</strong>（能/不能）转成<strong>连续标量</strong>（多容易/多难）。布尔判定对边界敏感，连续标量更鲁棒。算法上对应的工具就是<strong>带权最短路径</strong>（Dijkstra 算法），它天然适合处理"每条边有代价、总代价最小"的问题。
+</div>
+
+<div class="warn">
+<div class="warn-title">必须诚实承认的局限</div>
+"高代价 ≠ 禁止"。如果一个体素被四面包围全是高代价区，最短路径仍会从中间穿过（没有替代路径）。所以 C1-C4 的真正满足靠<strong>事后验证</strong>（第六阶段做），不是算法保证。这点必须写进论文："标量场提供软引导，约束满足由事后验证判定。"
+</div>
+
+<!-- ============== 第一节 基础场 ============== -->
+<h2 id="fields">第一节：四个基础场</h2>
+
+<div class="goal">
+本节学完后你应该能：(1) 说出每个场代表什么物理量；(2) 知道每个场怎么算出来；(3) 理解为什么需要每个场。
+</div>
+
+<p>这四个场是<strong>第一阶段的输出</strong>，给后面所有阶段当原料用。计算一次缓存重用。</p>
+
+<!-- --- 1.1 符号距离场 --- -->
+<h3 id="sdf">1.1 符号距离场（SDF）</h3>
+
+<h4>这个场代表什么</h4>
+<p>每个体素中心到模型表面的<strong>最近距离</strong>，带正负号。</p>
+<ul>
+<li>正值：体素在模型<strong>外面</strong>（如背景空气）</li>
+<li>负值：体素在模型<strong>内部</strong>（如模型实体）</li>
+<li>零值：体素正好落在表面上</li>
+</ul>
+
+<svg width="400" height="160" viewBox="0 0 400 160">
+  <!-- 圆形模型 -->
+  <circle cx="200" cy="80" r="50" fill="#e8efff" stroke="#2a4a8a" stroke-width="2"/>
+  <text x="200" y="85" text-anchor="middle" font-size="11" fill="#2a4a8a">模型实体</text>
+  <!-- 内部点 -->
+  <circle cx="200" cy="80" r="3" fill="#a03030"/>
+  <text x="208" y="83" font-size="10" fill="#a03030">−50 (内部，离表面 50mm)</text>
+  <!-- 外部点 -->
+  <circle cx="320" cy="80" r="3" fill="#4a7a2a"/>
+  <text x="328" y="83" font-size="10" fill="#4a7a2a">+70 (外部，离表面 70mm)</text>
+  <!-- 表面点 -->
+  <circle cx="250" cy="80" r="3" fill="#888"/>
+  <text x="258" y="83" font-size="10" fill="#888">0 (表面)</text>
+</svg>
+
+<h4>怎么算</h4>
+<ol>
+<li>对输入网格调 <code>igl::signed_distance</code>（底层用包围盒树 + 绕数判断内外）</li>
+<li>只在<strong>窄带模式</strong>下算：|符号距离| ≤ 3 倍体素尺寸的体素算精确值，其余标无穷</li>
+<li>单位：毫米（mm）</li>
+</ol>
+
+<div class="why">
+<div class="why-title">为什么是窄带模式</div>
+我们后面所有计算都只关心<strong>表面附近</strong>的体素（喷头会经过的地方），远离表面的体素不需要精确距离。窄带模式让 SDF 计算从 O(N²) 降到 O(N log N)，对毛主席模型（约 27 万体素）从分钟级降到秒级。
+</div>
+
+<h4>为什么需要这个场</h4>
+<p>SDF 是<strong>所有其他场的基础</strong>：</p>
+<ul>
+<li>局部开口半径场：用 SDF 做射线投射的起点</li>
+<li>最大主曲率场：从 SDF 间接推导</li>
+<li>平滑法向场：从 SDF 梯度的方向推导</li>
+<li>凹陷风险惩罚：间接通过开口半径场依赖 SDF</li>
+</ul>
+
+<div class="warn">
+<div class="warn-title">数值坑：中轴上的不连续</div>
+在模型的"中轴"（离两个表面等距的点集）上，SDF 理论上不可微（出现尖点）。离散网格上会表现为奇异值。计算梯度 ∇SDF 时，对 |∇SDF| < ε 的位置要跳过。
+</div>
+
+<!-- --- 1.2 局部开口半径场 --- -->
+<h3 id="cavity">1.2 局部开口半径场</h3>
+
+<h4>这个场代表什么</h4>
+<p>每个表面附近体素的<strong>"喷头能从外面塞进来的最大半径"</strong>。直接服务于后面的凹陷风险惩罚。</p>
+
+<svg width="500" height="220" viewBox="0 0 500 220">
+  <!-- 凹形模型剖面 -->
+  <path d="M 80 30 L 80 180 L 200 180 L 200 130 Q 220 100 250 100 Q 280 100 300 130 L 300 180 L 420 180 L 420 30 Z"
+        fill="#e8efff" stroke="#2a4a8a" stroke-width="2"/>
+  <text x="250" y="20" text-anchor="middle" font-size="11" fill="#555">模型（剖面，凹陷形）</text>
+
+  <!-- 宽开口体素 -->
+  <circle cx="350" cy="60" r="6" fill="#d0e8d0" stroke="#4a7a2a"/>
+  <text x="360" y="64" font-size="10" fill="#4a7a2a">A: 开口宽 → 喷头能进</text>
+
+  <!-- 窄开口体素 -->
+  <circle cx="250" cy="115" r="6" fill="#f8d0d0" stroke="#a03030"/>
+  <text x="260" y="119" font-size="10" fill="#a03030">B: 凹陷窄 → 喷头进不去</text>
+
+  <!-- 喷头示意 -->
+  <rect x="346" y="38" width="8" height="20" fill="#888" stroke="#333"/>
+  <text x="345" y="33" font-size="9" fill="#888">喷头</text>
+</svg>
+
+<div class="think">
+<div class="think-title">关键认知：开口半径 ≠ 符号距离</div>
+"到表面的距离"和"喷头能塞进来的半径"是<strong>两个不同的几何量</strong>。
+<ul>
+<li>SDF 问的是"我离表面多远"</li>
+<li>开口半径问的是"我周围有多大空间能容纳一个球"</li>
+</ul>
+对于凹陷深处的点，可能离表面很近（SDF 小），但开口很窄（开口半径也小，喷头塞不进）。这两个不能混用。
+</div>
+
+<h4>怎么算</h4>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>选起点</strong>：对每个表面附近体素 <span class="var">v</span>，从 <span class="var">v</span> 沿外法向偏移 0.5mm（保证起点在模型外）作为射线起点 <span class="var">p</span>。
+</div></li>
+<li><div class="step-content">
+<strong>32 方向射线投射</strong>：从 <span class="var">p</span> 沿 32 个均匀分布的方向 d₁, d₂, ..., d₃₂ 射出射线，找每条射线第一次撞到"反面"（模型另一侧的表面）的距离 l₁, l₂, ..., l₃₂。
+</div></li>
+<li><div class="step-content">
+<strong>取第 20 百分位作为半径估计</strong>：
+<div class="formula">
+开口半径(v) = 排序后(l₁, ..., l₃₂) 的第 20 百分位 ÷ 2
+</div>
+</div></li>
+</ol>
+
+<svg width="450" height="220" viewBox="0 0 450 220">
+  <!-- 凹陷形状 -->
+  <path d="M 50 60 L 50 200 L 400 200 L 400 60 L 280 60 L 280 140 L 170 140 L 170 60 Z"
+        fill="#e8efff" stroke="#2a4a8a" stroke-width="2"/>
+
+  <!-- 起点 p -->
+  <circle cx="225" cy="155" r="4" fill="#d35400"/>
+  <text x="232" y="158" font-size="11" fill="#d35400">p (起点)</text>
+
+  <!-- 32 个方向射线（只画 8 条示意） -->
+  <line x1="225" y1="155" x2="160" y2="100" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="225" y2="50" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="290" y2="100" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="330" y2="160" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="225" y2="200" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="120" y2="155" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="320" y2="155" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+  <line x1="225" y1="155" x2="170" y2="200" stroke="#888" stroke-width="1" stroke-dasharray="2,2"/>
+
+  <!-- 命中点 -->
+  <circle cx="160" cy="100" r="2.5" fill="#a03030"/>
+  <circle cx="225" cy="50" r="2.5" fill="#a03030"/>
+  <circle cx="290" cy="100" r="2.5" fill="#a03030"/>
+  <circle cx="330" cy="160" r="2.5" fill="#a03030"/>
+  <circle cx="225" cy="200" r="2.5" fill="#a03030"/>
+  <circle cx="120" cy="155" r="2.5" fill="#a03030"/>
+  <circle cx="320" cy="155" r="2.5" fill="#a03030"/>
+  <circle cx="170" cy="200" r="2.5" fill="#a03030"/>
+</svg>
+<p class="diagram-caption">从体素中心射出 32 条射线（图中示意 8 条），找每条射线碰到模型对面的距离</p>
+
+<div class="why">
+<div class="why-title">为什么是第 20 百分位，不是最小值？</div>
+<ul>
+<li><strong>用最小值太悲观</strong>：只要一个方向上有一个长突起伸过来，整个邻域就被标低。但工程上喷头从大多数方向能进来就够了，不需要所有方向都开放。</li>
+<li><strong>用平均值太乐观</strong>：少数特别宽的方向会拉高平均值，掩盖真正的窄方向。</li>
+<li><strong>第 20 百分位</strong>表示"至少有 80% 的方向开口比这个宽"，是工程上的"保守但不悲观"折中。</li>
+</ul>
+</div>
+
+<div class="why">
+<div class="why-title">为什么是 32 个方向？</div>
+<ul>
+<li>6 个方向（仅面方向）：漏检对角线开口，太粗糙</li>
+<li>100 个方向：精度增加可忽略，计算时间多 3 倍</li>
+<li>32 个方向：球面 Fibonacci 均匀采样的工程甜点</li>
+</ul>
+</div>
+
+<h4>为什么需要这个场</h4>
+<p>直接服务于凹陷风险惩罚 p_clear（第二节 2.1）。喷头是有体积的圆柱，进不去窄缝；这个场告诉算法"哪里窄"。</p>
+
+<!-- --- 1.3 最大主曲率场 --- -->
+<h3 id="curv">1.3 最大主曲率场</h3>
+
+<h4>这个场代表什么</h4>
+<p>每个表面附近体素处，<strong>曲面在该点弯曲程度的上界</strong>。直接服务于约束 C4（喷头球塞不进半径小于 r_n 的凹陷）。</p>
+
+<h4>什么是主曲率</h4>
+<p>在曲面上任意一点，沿不同方向的"弯曲程度"不同。最大的弯曲程度叫 κ₁（第一主曲率），最小的叫 κ₂（第二主曲率）。</p>
+
+<table>
+<thead>
+<tr><th>几何形状</th><th>κ₁ 和 κ₂</th><th>解释</th></tr>
+</thead>
+<tbody>
+<tr><td>球面（半径 R）</td><td>κ₁ = κ₂ = 1/R</td><td>各方向弯曲一样</td></tr>
+<tr><td>圆柱面（半径 R）</td><td>κ₁ = 1/R, κ₂ = 0</td><td>一个方向弯，另一个方向直</td></tr>
+<tr><td>鞍面（如马鞍）</td><td>κ₁ = +1/R, κ₂ = −1/R</td><td>一个方向凸，另一个方向凹</td></tr>
+<tr><td>平面</td><td>κ₁ = κ₂ = 0</td><td>不弯</td></tr>
+</tbody>
+</table>
+
+<div class="warn">
+<div class="warn-title">关键修正：用最大主曲率，不用平均曲率</div>
+平均曲率定义为 H = (κ₁ + κ₂) / 2。<strong>对于鞍面 κ₁ = −κ₂，平均曲率 H = 0</strong>，但单方向上喷头仍可能塞不进去（κ₁ 或 κ₂ 绝对值大）。
+<br><br>所以我们用 max(|κ₁|, |κ₂|) 而不是 |H|。
+</div>
+
+<h4>怎么算</h4>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>在网格顶点上算</strong>：调 <code>igl::principal_curvature</code>，它内部用"形状算子"（shape operator）从网格的二阶基本形式中提取 κ₁, κ₂。
+</div></li>
+<li><div class="step-content">
+<strong>插值到体素</strong>：对每个表面附近体素 <span class="var">v</span>，找最近的网格顶点 <span class="var">v_nearest</span>，把它的曲率赋给 <span class="var">v</span>：
+<div class="formula">
+κ_max(v) = max(|κ₁(v_nearest)|, |κ₂(v_nearest)|)
+</div>
+</div></li>
+</ol>
+
+<div class="why">
+<div class="why-title">为什么不直接用 SDF 的 Hessian 估曲率？</div>
+理论上有公式 H = ∇·(∇SDF / |∇SDF|)，看起来很方便。<strong>实际上行不通</strong>：
+<ul>
+<li>0.5mm 体素上算 SDF，本身误差约 ±0.05mm（约 10%）</li>
+<li>一阶导（梯度）放大误差到 ±0.1（噪声/信号比 ≈ 20%）</li>
+<li>二阶导（Hessian）继续放大到 ±0.5（噪声/信号比 ≈ 100%）</li>
+<li>对于 1/r_n = 0.1 mm⁻¹ 这种细微判据，<strong>信噪比根本不够</strong></li>
+</ul>
+而形状算子直接在网格表面上算（不依赖体素 SDF），精度高得多。
+</div>
+
+<!-- --- 1.4 平滑法向场 --- -->
+<h3 id="normal">1.4 平滑法向场</h3>
+
+<h4>这个场代表什么</h4>
+<p>每个体素处的<strong>"曲面外法向方向"</strong>，单位向量。</p>
+
+<h4>怎么算</h4>
+<ol>
+<li>从网格顶点法向（<code>igl::per_vertex_normals</code>）插值到体素</li>
+<li>做 1-2 轮邻域平均（去除高频噪声）</li>
+<li>单位化</li>
+</ol>
+
+<div class="why">
+<div class="why-title">为什么需要平滑？</div>
+原始顶点法向在网格边界、尖角处不连续（同一顶点不同三角面给出不同法向）。如果直接用，下游用到法向的地方（如朝向惩罚 p_orient）会跳变。
+<br><br>1-2 轮邻域平均够了。更多次平均会让局部细节丢失（比如本来该指向不同方向的两个尖角被抹平成一个方向）。
+</div>
+
+<h4>为什么需要这个场</h4>
+<ul>
+<li>第二节 2.2：朝向惩罚 p_orient 需要 N_smooth 算"融合式偏好方向" B(v)</li>
+<li>第六节：工具姿态估计用 ∇SDF 的方向（与 N_smooth 几乎一致，但 ∇SDF 在中轴附近不稳，N_smooth 更平滑）</li>
+</ul>
+
+<div class="chapter-summary">
+<h4>第一节小结</h4>
+<table>
+<thead><tr><th>场</th><th>物理意义</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td>符号距离场</td><td>到表面的距离</td><td>所有其他场的基础</td></tr>
+<tr><td>局部开口半径场</td><td>"喷头能从外面塞进多大半径"</td><td>凹陷风险惩罚 p_clear</td></tr>
+<tr><td>最大主曲率场</td><td>曲面弯曲程度上界</td><td>曲率违反惩罚 p_curv</td></tr>
+<tr><td>平滑法向场</td><td>曲面外法向方向</td><td>朝向惩罚 p_orient + 工具姿态估计</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============== 第二节 惩罚项 ============== -->
+<h2 id="penalties">第二节：四个惩罚项</h2>
+
+<div class="goal">
+本节学完后你应该能：(1) 写出每个惩罚项的公式；(2) 解释为什么这样定义；(3) 知道每个惩罚项要处理的物理现象。
+</div>
+
+<p>这一节是<strong>第二阶段的核心</strong>。我们把第一节算好的 4 个基础场，组合成 4 个惩罚项（外加 1 个逆运动学边际惩罚），喂给 Dijkstra 算法当边权。</p>
+
+<!-- --- 2.1 凹陷风险惩罚 --- -->
+<h3 id="p_clear">2.1 凹陷风险惩罚 p_clear</h3>
+
+<h4>物理动机</h4>
+<p>如果某体素附近的开口比喷头本体还窄，喷头根本进不去 → 算法应该让最短路径避开这个区域。</p>
+
+<h4>定义推导</h4>
+
+<p><strong>朴素想法</strong>：开口小于喷头半径就罚。</p>
+<div class="formula">
+p_clear_朴素(v) = max(0, r_n − 开口半径(v))
+</div>
+
+<p>这个公式有两个问题：</p>
+<ol>
+<li><strong>缺少安全余量</strong>：体素离散化误差约 ±0.5mm，喷头校准误差约 ±1mm，应该留出"余量"</li>
+<li><strong>线性惩罚不够区分</strong>：差 0.1mm 和差 5mm 应该有数量级差异，不该都是线性</li>
+</ol>
+
+<p><strong>改进 1</strong>：加余量 margin = 2mm。</p>
+<div class="formula">
+p_clear(v) = max(0, r_n + margin − 开口半径(v))
+</div>
+
+<p><strong>改进 2</strong>：平方，让"差很多"惩罚远大于"差一点"。</p>
+<div class="formula">
+p_clear_raw(v) = max(0, r_n + margin − 开口半径(v))²
+<div class="formula-label">最终定义</div>
+</div>
+
+<div class="number-eg">
+假设 r_n = 10mm, margin = 2mm。考虑三个体素：
+<ul>
+<li>体素 A：开口半径 = 15mm（开口很宽）→ p_clear = max(0, 12 − 15)² = 0 → 不罚</li>
+<li>体素 B：开口半径 = 11mm（刚好够）→ p_clear = max(0, 12 − 11)² = 1 → 微罚</li>
+<li>体素 C：开口半径 = 8mm（不够）→ p_clear = max(0, 12 − 8)² = 16 → 重罚</li>
+<li>体素 D：开口半径 = 2mm（极窄）→ p_clear = max(0, 12 − 2)² = 100 → 极重罚</li>
+</ul>
+</div>
+
+<div class="why">
+<div class="why-title">为什么不直接做硬掩码（开口半径小于 r_n 就拒绝该体素）？</div>
+硬掩码会让 Dijkstra 在边界处突变 → 等值面提取后<strong>碎裂</strong>。软惩罚让算法平滑过渡，最短路径会"绕远"但不"断"。
+<br><br>这是算法稳定性的关键设计选择：<strong>软惩罚 + 事后验证</strong>，不是硬约束。
+</div>
+
+<h4>单位</h4>
+<p>mm²（量纲会在归一化阶段抹平）</p>
+
+<!-- --- 2.2 朝向偏离惩罚 --- -->
+<h3 id="p_orient">2.2 朝向偏离惩罚 p_orient（融合式偏好方向）</h3>
+
+<h4>物理动机</h4>
+<p>我们希望距离场<strong>"从底部往上长"</strong>，等值面随高度递增。这样切出来的弯曲层一层一层往外堆，符合打印过程的物理逻辑。</p>
+
+<h4>朴素定义及其问题</h4>
+
+<div class="formula">
+p_orient_朴素(u, v) = 1 − |归一化(v − u) · 全局向上方向|
+</div>
+
+<p>这里 (u, v) 是体素图上的一条边，"全局向上方向" = (0, 0, 1)。</p>
+
+<ul>
+<li>边方向接近 +z（往上走）→ 点积接近 1 → 罚 = 0</li>
+<li>边方向接近 ±水平（横着走）→ 点积接近 0 → 罚 = 1</li>
+<li>边方向接近 −z（往下走）→ 点积接近 −1，取绝对值后 = 1 → 罚 = 0（允许下行，但实际很少）</li>
+</ul>
+
+<div class="warn">
+<div class="warn-title">隐性数学问题：β 越大越像水平切片</div>
+如果只用全局向上方向，算法会<strong>逼迫</strong>所有等值面变成水平平面（这样所有边都朝上）。
+<br><br>但我们要的是<strong>弯曲层</strong>，应该贴合模型形状。
+<br><br>举例：在毛主席头顶（球冠形），最优等值面是<strong>球面</strong>（贴合头形），而不是水平切片。如果用朴素公式 + 大 β，等值面会被强行拉平，导致切出的层不贴合曲面，碎裂率上升。
+</div>
+
+<h4>修正：融合式偏好方向</h4>
+
+<p>我们改用一个<strong>融合的偏好方向</strong> B(v)，每个体素自己一个：</p>
+
+<div class="formula">
+B(v) = 归一化( (1 − η) × 全局向上方向 + η × 平滑法向(v) )
+</div>
+
+<p>其中 η ∈ [0, 1] 是融合权重。然后：</p>
+
+<div class="formula">
+p_orient_raw(u, v) = 1 − |归一化(v − u) · B(v)|
+<div class="formula-label">最终定义</div>
+</div>
+
+<h4>融合权重 η 的物理意义</h4>
+
+<table>
+<thead><tr><th>η</th><th>行为</th></tr></thead>
+<tbody>
+<tr><td>η = 0</td><td>完全用全局向上方向 → 退化为朴素版 → 等值面被拉平</td></tr>
+<tr><td>η = 1</td><td>完全用局部法向 → 没有全局推进方向 → 可能不收敛</td></tr>
+<tr><td><strong>η = 0.3（默认）</strong></td><td>"从底部推进"的全局倾向 + "贴合形状"的局部折中</td></tr>
+</tbody>
+</table>
+
+<svg width="500" height="200" viewBox="0 0 500 200">
+  <!-- 模型轮廓 -->
+  <path d="M 80 180 Q 100 100 200 80 Q 300 60 400 80 Q 420 100 420 180 Z"
+        fill="#e8efff" stroke="#2a4a8a" stroke-width="2"/>
+
+  <!-- 底部体素的 B -->
+  <circle cx="150" cy="170" r="3" fill="#333"/>
+  <line x1="150" y1="170" x2="150" y2="135" stroke="#d35400" stroke-width="2"
+        marker-end="url(#arrowhead)"/>
+  <text x="125" y="190" font-size="9">底部：B 几乎向上</text>
+
+  <!-- 侧面体素的 B -->
+  <circle cx="120" cy="120" r="3" fill="#333"/>
+  <line x1="120" y1="120" x2="98" y2="95" stroke="#d35400" stroke-width="2"
+        marker-end="url(#arrowhead)"/>
+  <text x="40" y="115" font-size="9">侧面：B 斜向上</text>
+
+  <!-- 头顶体素的 B -->
+  <circle cx="280" cy="78" r="3" fill="#333"/>
+  <line x1="280" y1="78" x2="285" y2="38" stroke="#d35400" stroke-width="2"
+        marker-end="url(#arrowhead)"/>
+  <text x="290" y="50" font-size="9">头顶：B 略向上 + 略向外</text>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d35400"/>
+    </marker>
+  </defs>
+</svg>
+<p class="diagram-caption">η = 0.3 时的融合偏好方向 B(v)：从底部主要朝上，到头顶逐渐贴合曲面外法向</p>
+
+<div class="number-eg">
+假设全局向上方向 = (0, 0, 1)，η = 0.3。
+<ul>
+<li><strong>底部体素</strong>，平滑法向 ≈ (0, 0, −1)（朝下，因为外法向指向平台外侧）：
+<br>B = 归一化( 0.7 × (0,0,1) + 0.3 × (0,0,−1) ) = 归一化( (0,0,0.4) ) = (0,0,1) → 几乎全局向上</li>
+<li><strong>侧面体素</strong>，平滑法向 = (1,0,0)（朝侧外）：
+<br>B = 归一化( 0.7 × (0,0,1) + 0.3 × (1,0,0) ) = 归一化( (0.3, 0, 0.7) ) ≈ (0.39, 0, 0.92) → 斜向上</li>
+<li><strong>头顶体素</strong>，平滑法向 = (0, 0, 1)（朝上）：
+<br>B = 归一化( 0.7 × (0,0,1) + 0.3 × (0,0,1) ) = (0,0,1) → 完全向上</li>
+</ul>
+</div>
+
+<h4>单位</h4>
+<p>无量纲（点积本身在 [−1, 1]，整个 p_orient 在 [0, 1]）</p>
+
+<!-- --- 2.3 曲率违反惩罚 --- -->
+<h3 id="p_curv">2.3 曲率违反惩罚 p_curv</h3>
+
+<h4>物理动机</h4>
+<p>曲面上某点的最大主曲率超过 1/r_n 时，喷头球塞不进该凹陷。算法应该避开这些位置。</p>
+
+<h4>定义</h4>
+
+<div class="formula">
+p_curv_raw(v) = max(0, κ_max(v) − 1/r_n)²
+</div>
+
+<p>结构和 p_clear 一样：超出阈值才罚，平方让"超得多"罚重。</p>
+
+<div class="number-eg">
+假设 r_n = 10mm，则 1/r_n = 0.1 mm⁻¹。
+<ul>
+<li>体素 A：κ_max = 0.05 mm⁻¹（弯曲程度小）→ p_curv = 0 → 不罚</li>
+<li>体素 B：κ_max = 0.15 mm⁻¹（弯曲超阈值 50%）→ p_curv = max(0, 0.15−0.1)² = 0.0025</li>
+<li>体素 C：κ_max = 0.3 mm⁻¹（极弯，如尖锐凹陷）→ p_curv = max(0, 0.3−0.1)² = 0.04</li>
+</ul>
+这里数值看起来都很小，是因为单位是 (1/mm)² = 1/mm²。但归一化后会被映射到 [0, 1]，量纲问题消失。
+</div>
+
+<h4>何时触发</h4>
+<ul>
+<li>毛主席头发褶皱（< 1mm 的凹陷）</li>
+<li>Armadillo 关节凹陷</li>
+<li>兔子耳朵根部尖角</li>
+</ul>
+<p>在第零阶段（几何调理）做完重度平滑后，大部分高曲率特征应当已被抹平。p_curv 是"剩余高曲率"的兜底。</p>
+
+<h4>单位</h4>
+<p>(1/mm)² = 1/mm²</p>
+
+<!-- --- 2.4 逆运动学边际惩罚 --- -->
+<h3 id="p_ik">2.4 逆运动学边际惩罚 p_ik（核心创新）</h3>
+
+<div class="goal">
+本小节是 v6.2 算法<strong>窄但能立的算法创新</strong>。其他三个惩罚项在文献中都有先例，但"把 KR4 R600 的逆运动学边际度注入距离场构造阶段" + "邻域分支一致性" 这两件事的组合是新的。
+</div>
+
+<h4>物理动机</h4>
+<p>距离场上某点的特性可能"几何上合理"，但<strong>机器人摆不到那里</strong>：</p>
+<ul>
+<li>关节角超出限位</li>
+<li>逆运动学无解（工作空间外）</li>
+<li>临近奇异点（机器人姿态不可控）</li>
+</ul>
+<p>这些位置 → 算法应该让最短路径绕开 → 切出的弯曲层就在"机器人舒服"的区域。</p>
+
+<h4>计算流程（6 步）</h4>
+
+<p>对每个体素 v，我们要算一个综合的"逆运动学边际度"。流程如下：</p>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>从工具姿态估计取 tool_z</strong>（第六节会详细讲）：
+<div class="formula">
+tool_z(v) = −∇SDF(v) / |∇SDF(v)|   （喷头朝模型内部）
+</div>
+然后构造稳定的参考轴 tool_x_ref 和 tool_y_ref（不依赖路径切线，因为路径还不存在）。
+</div></li>
+
+<li><div class="step-content">
+<strong>枚举 12 个偏航角采样</strong>（喷头绕 tool_z 自旋的自由度）：
+<div class="formula">
+ψ ∈ {0°, 30°, 60°, ..., 330°}
+</div>
+每个 ψ 给出一个完整的工具姿态矩阵 R_ψ。
+</div></li>
+
+<li><div class="step-content">
+<strong>解析逆运动学一次返回 8 个解分支</strong>：
+<div class="formula">
+解集合 = 解析IK(v 的位置, R_ψ)   返回最多 8 个 q
+</div>
+KR4 R600 是球腕机器人，对每个目标位姿最多有 8 个不同的关节角组合（前后臂×肘上下×腕翻不翻）。
+</div></li>
+
+<li><div class="step-content">
+<strong>对每个解算"边际度"</strong>。先做快筛去掉明显不行的（关节限位、奇异性的便宜判据），剩下的前 3 个解算精确雅可比奇异值：
+<div class="formula">
+J_ik(q) = (1/3) × 关节限位惩罚(q) + (1/3) × 奇异性惩罚(q) + (1/3) × 工作空间惩罚(q)
+</div>
+三个子惩罚的详细定义见下方。
+</div></li>
+
+<li><div class="step-content">
+<strong>取所有 (ψ, q) 组合的最小 J_ik</strong>：
+<div class="formula">
+J_ik_min(v) = min  J_ik(q)
+              ψ, q
+</div>
+意思是"该体素最优情况下机器人有多舒服"。
+</div></li>
+
+<li><div class="step-content">
+<strong>加上"邻域分支一致性"惩罚</strong>（关键创新）：
+<div class="formula">
+p_ik_raw(v) = J_ik_min(v) + λ_consist × 分支波动度(v)
+</div>
+其中 λ_consist = 0.5 是默认权重。下面解释为什么需要这一项。
+</div></li>
+</ol>
+
+<h4>三个子惩罚的定义</h4>
+
+<h4>关节限位惩罚 jl_penalty</h4>
+<p>关节角离限位中央越远越不好。</p>
+<div class="formula">
+jl_penalty_norm(q) = (1/6) × Σᵢ ( (qᵢ − q_中位ᵢ) / (q_范围ᵢ / 2) )²
+</div>
+<ul>
+<li>q_中位ᵢ = (q_lim_minᵢ + q_lim_maxᵢ) / 2</li>
+<li>q_范围ᵢ = q_lim_maxᵢ − q_lim_minᵢ</li>
+<li>关节在限位中央 → 该项 = 0</li>
+<li>关节贴在限位边缘 → 该项 ≈ 1</li>
+<li>6 关节平均权重，结果归一化到 [0, 1]</li>
+</ul>
+
+<h4>奇异性惩罚 sing_penalty</h4>
+<p>雅可比矩阵的最小奇异值 σ_min 接近 0 → 机器人某些运动方向不可控。</p>
+<div class="formula">
+sing_penalty_norm(σ_min) = exp(−σ_min / σ_ref)
+</div>
+<ul>
+<li>σ_ref = 0.05（经验阈值）</li>
+<li>σ_min ≫ 0.05 → exp(−大数) ≈ 0 → 不罚</li>
+<li>σ_min = 0.05 → exp(−1) ≈ 0.37 → 中等罚</li>
+<li>σ_min → 0 → exp(0) = 1 → 罚最大</li>
+</ul>
+
+<div class="why">
+<div class="why-title">为什么用指数而不是 1/(σ + ε)？</div>
+1/(σ + ε) 在 σ → 0 时爆炸到无穷大，难归一化，下游容易出 NaN。<br>
+指数函数天然在 [0, 1] 范围内，光滑稳定。
+</div>
+
+<h4>工作空间边际惩罚 ws_penalty</h4>
+<p>工具中心点离 KR4 R600 工作空间球壳边界（内半径 100mm，外半径 600mm）越近越不好。</p>
+<div class="formula">
+TCP_距离 = |正运动学(q).position − 机器人基座|<br>
+ws_penalty_norm(q) = 斜坡(TCP_距离, r_min, r_max)
+</div>
+<p>斜坡函数定义：</p>
+<ul>
+<li>中心区（约 300-500mm）→ 0</li>
+<li>接近边界（前后 100mm 内）→ 0 到 1 线性增长</li>
+<li>已越界 → 1</li>
+</ul>
+
+<h4>分支波动度（创新点）</h4>
+
+<div class="goal">
+这是 v6.2 算法的窄创新点之一。它解决一个微妙的问题：<strong>单点逆运动学可达 ≠ 路径连续逆运动学可达</strong>。
+</div>
+
+<p><strong>问题描述</strong>：如果体素 v 的最优逆运动学解用了 IK 分支 3（如"前臂 + 肘上 + 腕不翻"），而它的邻居体素都用 IK 分支 5（如"后臂 + 肘下 + 腕翻"），那么沿着层走时，从 v 到邻居必须<strong>翻臂</strong>，关节角差极大，第五阶段的动态规划必然失败。</p>
+
+<svg width="500" height="180" viewBox="0 0 500 180">
+  <!-- 体素网格 -->
+  <g stroke="#aaa" stroke-width="0.5" fill="none">
+    <line x1="50" y1="40" x2="450" y2="40"/>
+    <line x1="50" y1="90" x2="450" y2="90"/>
+    <line x1="50" y1="140" x2="450" y2="140"/>
+    <line x1="50" y1="40" x2="50" y2="140"/>
+    <line x1="100" y1="40" x2="100" y2="140"/>
+    <line x1="150" y1="40" x2="150" y2="140"/>
+    <line x1="200" y1="40" x2="200" y2="140"/>
+    <line x1="250" y1="40" x2="250" y2="140"/>
+    <line x1="300" y1="40" x2="300" y2="140"/>
+    <line x1="350" y1="40" x2="350" y2="140"/>
+    <line x1="400" y1="40" x2="400" y2="140"/>
+    <line x1="450" y1="40" x2="450" y2="140"/>
+  </g>
+  <!-- 体素值 -->
+  <text x="75" y="70" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="125" y="70" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="175" y="70" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+  <text x="225" y="70" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="275" y="70" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+  <text x="325" y="70" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="375" y="70" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+  <text x="425" y="70" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+
+  <text x="75" y="120" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="125" y="120" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+  <text x="175" y="120" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="225" y="120" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+  <text x="275" y="120" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="325" y="120" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+  <text x="375" y="120" text-anchor="middle" font-size="11" fill="#2a4a8a">3</text>
+  <text x="425" y="120" text-anchor="middle" font-size="11" fill="#a03030">5</text>
+
+  <text x="250" y="25" text-anchor="middle" font-size="12" fill="#a03030">最优 IK 分支频繁切换 → 分支波动度高 → p_ik 大</text>
+  <text x="250" y="165" text-anchor="middle" font-size="11" fill="#555">每个数字表示该体素最优 IK 分支编号</text>
+</svg>
+
+<p><strong>解决方法</strong>：在 p_ik 中加入"分支波动度"项，对邻域内分支频繁切换的位置加额外惩罚。</p>
+
+<div class="formula">
+分支波动度(v) = 1 − ( 主导分支在邻域中的占比 )
+</div>
+
+<p>具体算法：</p>
+<ul>
+<li>找出体素 v 的 26 个邻居（3×3×3 立方除自己）</li>
+<li>每个邻居都有一个最优 IK 分支编号</li>
+<li>找出现次数最多的分支（"主导分支"），数它在 26 个邻居中占的比例</li>
+<li>波动度 = 1 − 该比例</li>
+</ul>
+
+<div class="number-eg">
+<ul>
+<li>26 个邻居全选 IK 分支 3 → 主导比例 = 26/26 = 1 → 波动度 = 0</li>
+<li>13 个邻居选分支 3，13 个选分支 5 → 主导比例 = 13/26 = 0.5 → 波动度 = 0.5</li>
+<li>完全分散到 8 个不同分支 → 主导比例 ≈ 0.1 → 波动度 ≈ 0.9</li>
+</ul>
+</div>
+
+<div class="why">
+<div class="why-title">为什么这个项关键？</div>
+没有它的话，distance field 只会避开"单点不可达"的位置，<strong>但仍会穿过"单点可达但路径不连续"的位置</strong>。结果是 distance field 看起来漂亮，但下游路径生成阶段大批失败。
+<br><br>有了它，distance field 不仅避开"摆不到"的位置，还避开"摆得到但摆不连贯"的位置。
+</div>
+
+<h4>p_ik 的两个工程优化</h4>
+
+<p><strong>优化 1：粗网格</strong>。如果对每个 0.8mm 体素都算 p_ik，毛主席模型约 27 万体素，每体素 96 个候选（12 偏航 × 8 分支），单次精确计算约 16 微秒，总耗时约 7 分钟。</p>
+
+<p>改进：用 1.6mm 粗网格算 p_ik（约 3.4 万体素），然后三线性插值回 0.8mm。耗时约 50 秒，分辨率损失对 bias 用途可忽略。</p>
+
+<p><strong>优化 2：多线程</strong>。p_ik 计算是"非常容易并行"的（每个体素独立），用 OpenMP 8 线程进一步提速 5-7 倍。</p>
+
+<div class="chapter-summary">
+<h4>第二节小结</h4>
+<table>
+<thead><tr><th>惩罚项</th><th>对应约束</th><th>公式结构</th></tr></thead>
+<tbody>
+<tr><td>p_clear（凹陷风险）</td><td>C3 喷头不撞</td><td>max(0, r_n + margin − 开口半径)²</td></tr>
+<tr><td>p_orient（朝向偏离）</td><td>C1 间接（推进性）</td><td>1 − |边方向 · 融合偏好方向|</td></tr>
+<tr><td>p_curv（曲率违反）</td><td>C4 曲率干涉</td><td>max(0, κ_max − 1/r_n)²</td></tr>
+<tr><td>p_ik（IK 边际）</td><td>C2 机器人可达</td><td>J_ik_min + λ × 分支波动度</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============== 第三节 归一化 ============== -->
+<h2 id="norm">第三节：惩罚项归一化</h2>
+
+<div class="goal">
+本节学完后你应该能：解释为什么必须做归一化、归一化算法的每一步在干什么。
+</div>
+
+<h3>为什么必须归一化</h3>
+
+<p>第二节算出来的 4 个惩罚项<strong>量纲完全不同</strong>：</p>
+
+<table>
+<thead><tr><th>惩罚项</th><th>单位</th><th>典型量级</th></tr></thead>
+<tbody>
+<tr><td>p_clear</td><td>mm²</td><td>0 到 150（差距 8mm 时罚 64）</td></tr>
+<tr><td>p_orient</td><td>无量纲</td><td>0 到 1</td></tr>
+<tr><td>p_curv</td><td>1/mm²</td><td>0 到 0.01（极小）</td></tr>
+<tr><td>p_ik</td><td>综合（无量纲）</td><td>0 到 100（极不稳定，取决于奇异性附近）</td></tr>
+</tbody>
+</table>
+
+<p>如果不归一化直接 α·p_clear + β·p_orient + γ·p_curv + δ·p_ik，会出现：</p>
+
+<div class="warn">
+<div class="warn-title">不归一化的后果</div>
+<ul>
+<li>δ 的物理意义不可解释。δ = 0.5 可能压倒其他全部，也可能完全无影响——<strong>取决于 p_ik 实际范围</strong></li>
+<li>γ·p_curv 数值太小，γ 怎么调都没效果</li>
+<li>论文里写"α = 1, β = 0.3, γ = 0.1, δ = 0.5"——审稿人会问"为什么这些数？怎么调出来的？"答不出</li>
+<li>消融实验不可解释</li>
+</ul>
+</div>
+
+<h3>归一化算法</h3>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>算第 5 和第 95 百分位</strong>（不是最小最大值！）：
+<div class="formula">
+p_05 = 第 5 百分位(p_raw)<br>
+p_95 = 第 95 百分位(p_raw)
+</div>
+</div></li>
+
+<li><div class="step-content">
+<strong>截尾</strong>（把极端值压回 p_05 / p_95）：
+<div class="formula">
+p_clip(v) = clamp(p_raw(v), p_05, p_95)
+</div>
+</div></li>
+
+<li><div class="step-content">
+<strong>线性映射到 [0, 1]</strong>：
+<div class="formula">
+p_norm(v) = (p_clip(v) − p_05) / (p_95 − p_05 + ε)
+</div>
+ε 是小量防除零（如 1e-9）。
+</div></li>
+</ol>
+
+<div class="why">
+<div class="why-title">为什么用第 5/95 百分位，不用最小/最大值？</div>
+<ul>
+<li><strong>最小/最大值受极端值主导</strong>。一个 outlier 体素（如奇异性附近）的 p_ik 可能是 10000，会把整个分布的"100% 位置"拉到 10000，结果中位的体素归一化后只有 0.001，<strong>归一化等于没做</strong>。</li>
+<li><strong>第 5/95 百分位更稳健</strong>。把最高 5% 和最低 5% 都视为"极端值"压平，中间 90% 的体素映射到完整的 [0, 1] 范围。</li>
+</ul>
+</div>
+
+<h3>归一化的输出</h3>
+
+<p>除了把 4 个 p_*_norm 用于边权，还要在诊断文件 diagnostic.json 里同时记录 raw 和 norm 的分布：</p>
+
+<pre>
+"penalty_stats": {
+  "p_clear_raw_p05": 0.0,
+  "p_clear_raw_p95": 25.4,
+  "p_clear_norm_mean": 0.12,
+  "p_orient_raw_p05": 0.1,
+  "p_orient_raw_p95": 0.9,
+  "p_orient_norm_mean": 0.5,
+  ...
+}
+</pre>
+
+<p>这样 α/β/γ/δ 的消融实验才有可解释性。</p>
+
+<!-- ============== 第四节 加权最短路径 ============== -->
+<h2 id="dijkstra">第四节：加权最短路径距离场（核心方程）</h2>
+
+<div class="goal">
+本节学完后你应该能：写出最终的边权公式、解释 4 个权重的物理意义、知道为什么要分两遍跑（Pass 1 和 Pass 4）。
+</div>
+
+<h3>最终边权公式</h3>
+
+<p>把第三节归一化后的 4 个惩罚项线性组合：</p>
+
+<div class="formula">
+w(u, v) = ||u − v||_mm × [ 1 + α·p_clear_norm(v) + β·p_orient_norm(u,v) + γ·p_curv_norm(v) + δ·p_ik_norm(v) ]
+<div class="formula-label">最终边权（v6.2 核心方程）</div>
+</div>
+
+<p>结构解释：</p>
+<ul>
+<li>外层 ||u − v||_mm 是<strong>几何长度</strong>，毫米单位</li>
+<li>方括号内是<strong>无量纲膨胀系数</strong>，至少为 1（所有惩罚为 0 时退化为纯几何距离）</li>
+<li>惩罚越大 → 膨胀系数越大 → 边权越大 → 算法越倾向于绕开</li>
+</ul>
+
+<h3>4 个权重的默认值与物理意义</h3>
+
+<table>
+<thead><tr><th>权重</th><th>默认值</th><th>物理意义</th></tr></thead>
+<tbody>
+<tr><td>α</td><td>1.0</td><td>凹陷风险与几何距离同等量级</td></tr>
+<tr><td>β</td><td>0.3</td><td>朝向偏差作为温和倾向，避免过强而退化为水平切片</td></tr>
+<tr><td>γ</td><td>0.1</td><td>曲率惩罚通常小（第零阶段已抹平大部分）</td></tr>
+<tr><td>δ</td><td>0.5</td><td>逆运动学项有意义但不压倒几何</td></tr>
+</tbody>
+</table>
+
+<h3>为什么要分两遍跑</h3>
+
+<p>不能一遍跑完，因为 p_ik 依赖工具姿态，工具姿态又依赖距离场 → 循环依赖。解决方法：分四步（Pass 1 → Pass 2 → Pass 3 → Pass 4）：</p>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>第一遍（Pass 1）：纯几何距离场 D₀</strong><br>
+边权只用 3 项几何惩罚（α, β, γ），<strong>没有 δ·p_ik</strong>。
+<div class="formula">
+w₁(u,v) = ||u−v|| × [1 + α·p_clear + β·p_orient + γ·p_curv]<br>
+D₀ = Dijkstra(起点=底部, w₁)
+</div>
+</div></li>
+
+<li><div class="step-content">
+<strong>第二步：从 D₀ 估算工具姿态</strong>（详见第六节）<br>
+得到每个体素的 tool_z 方向（喷头朝向）。
+</div></li>
+
+<li><div class="step-content">
+<strong>第三步：基于工具姿态算 p_ik</strong>（详见 2.4 节）<br>
+逐体素算逆运动学边际度。
+</div></li>
+
+<li><div class="step-content">
+<strong>第四遍（Pass 4）：完整距离场 D_final</strong><br>
+边权用完整 4 项（含 δ·p_ik）。
+<div class="formula">
+w₂(u,v) = ||u−v|| × [1 + α·p_clear + β·p_orient + γ·p_curv + δ·p_ik]<br>
+D_final = Dijkstra(起点=底部, w₂)
+</div>
+</div></li>
+</ol>
+
+<h3>Dijkstra 算法的关键参数</h3>
+
+<ul>
+<li><strong>起点</strong>：geometric bottom band（z 最小的一层体素，贴平台）</li>
+<li><strong>邻接关系</strong>：26 邻接（6 面 + 12 棱 + 8 角）</li>
+<li><strong>实现</strong>：标准 Dijkstra + 优先队列，复杂度 O(N log N)</li>
+<li><strong>规模</strong>：毛主席 27 万体素，几秒内完成</li>
+</ul>
+
+<h3>关键单位审计</h3>
+
+<div class="warn">
+<div class="warn-title">D_final_mm 虽然名字带 mm，不是真实物理距离！</div>
+D_final 是"加权最短路径累积"，<strong>不</strong>是欧几里得距离。
+<br><br>举例：同一对相邻体素几何距离 1mm：
+<ul>
+<li>在低惩罚区：膨胀系数 1.1 → D_final 增加 1.1</li>
+<li>在高惩罚区：膨胀系数 6 → D_final 增加 6</li>
+</ul>
+所以"D_final = 1.2mm 等值面"在不同区域物理上对应<strong>不同层厚</strong>：低惩罚区接近 1.2mm，高惩罚区可能只有 0.2mm（被压扁）。
+<br><br>论文必须明确写："标量场 D 是可制造性加权的最短路径距离，不是欧几里得距离。等值面间距对应实际层厚被局部惩罚调制。"
+</div>
+
+<!-- ============== 第五节 有界平滑 ============== -->
+<h2 id="smoothing">第五节：有界平滑（消除体素锯齿）</h2>
+
+<h3>为什么需要</h3>
+
+<p>Dijkstra 在 26 邻接体素图上算出来的距离场，本质是<strong>分段连续</strong>的（沿网格方向量化）。直接对它做等值面提取，表面会有锯齿。</p>
+
+<svg width="450" height="200" viewBox="0 0 450 200">
+  <!-- 锯齿 -->
+  <g stroke="#a03030" stroke-width="2" fill="none">
+    <polyline points="40,150 40,130 60,130 60,110 80,110 80,90 100,90 100,70 140,70 140,50 200,50 200,70 240,70 240,90 280,90 280,110 320,110 320,130 360,130 360,150"/>
+  </g>
+  <text x="100" y="180" font-size="12" fill="#a03030">直接 MC：锯齿表面 ✗</text>
+
+  <!-- 平滑 -->
+  <g stroke="#4a7a2a" stroke-width="2" fill="none">
+    <path d="M 40 150 Q 100 100 200 50 Q 300 80 360 150"/>
+  </g>
+  <text x="380" y="100" font-size="12" fill="#4a7a2a">平滑后：光滑表面 ✓</text>
+</svg>
+
+<h3>平滑算法</h3>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>初始化</strong>：D_s = D_final
+</div></li>
+
+<li><div class="step-content">
+<strong>迭代 5 轮</strong>，每轮：
+<div class="formula">
+D_tmp(v) = 邻域平均(D_s, v 的 26 邻居)<br>
+D_s(v) = clamp(D_tmp(v), D_final(v) − ε, D_final(v) + ε)<br>
+其中 ε = 0.3 × 层厚_mm（默认 0.36mm）
+</div>
+</div></li>
+
+<li><div class="step-content">
+<strong>输出</strong>：D_slice_mm = D_s（给等值面提取用）
+</div></li>
+</ol>
+
+<h3>为什么有"clamp 截断"这一步</h3>
+
+<div class="why">
+<div class="why-title">关键设计：bounded smoothing（有界平滑）</div>
+普通的拉普拉斯平滑会让数值任意扩散，可能让相邻层合并或跨越，<strong>破坏层拓扑</strong>。
+<br><br>截断到 [D_final − ε, D_final + ε] 区间，保证每个体素的平滑后值不偏离原值太多。
+<br><br>选 ε = 0.3 × 层厚：
+<ul>
+<li>太小（如 0.05）：平滑无效</li>
+<li>太大（如 1.0）：可能跨层合并</li>
+<li>0.3 × 层厚 是经验上"保留拓扑 + 消除锯齿"的最佳折中</li>
+</ul>
+</div>
+
+<h3>三个版本的距离场</h3>
+
+<table>
+<thead><tr><th>名字</th><th>单位</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td>D_final_mm</td><td>mm</td><td>原始 Dijkstra 输出，仅诊断用</td></tr>
+<tr><td>D_slice_mm</td><td>mm</td><td>平滑后，<strong>等值面提取用</strong></td></tr>
+<tr><td>D_norm</td><td>无量纲 [0,1]</td><td><strong>仅可视化</strong>，禁止给等值面提取</td></tr>
+</tbody>
+</table>
+
+<div class="warn">
+<div class="warn-title">编译期断言：禁止用 D_norm 切等值面</div>
+工程上加单元测试：如果代码里把归一化场传给 Marching Cubes，CMake test 必须 fail。<br>
+理由：归一化破坏了物理单位，等值面位置毫无意义。
+</div>
+
+<!-- ============== 第六节 工具姿态估计 ============== -->
+<h2 id="tool_pose">第六节：工具姿态估计（为逆运动学准备）</h2>
+
+<div class="goal">
+本节学完后你应该能：解释 tool_z 用 ∇SDF 而不用 ∇D₀ 的原因。
+</div>
+
+<h3>需要做什么</h3>
+
+<p>第三步（Pass 3）算 p_ik 需要知道每个体素处"喷头的姿态是什么"，才能算逆运动学。喷头姿态由 3 个轴决定：</p>
+<ul>
+<li>tool_z：喷头朝哪</li>
+<li>tool_x：旋转参考方向</li>
+<li>tool_y：补全正交系</li>
+</ul>
+
+<h3>关键修正：tool_z 用 ∇SDF，不用 ∇D₀</h3>
+
+<p>朴素做法：用 D₀ 的梯度方向估 tool_z。</p>
+
+<div class="warn">
+<div class="warn-title">为什么不能用 ∇D₀？</div>
+∇D₀ 是<strong>加权距离场的梯度</strong>，方向受惩罚项主导。
+<br><br>在 p_clear / p_curv 剧烈变化的区域，∇D₀ 主要反映"惩罚梯度"，<strong>不是几何法线</strong>。
+<br><br>用 ∇D₀ 估的 tool_z 偏离几何法线 → 喷头本体侧壁刮到表面、bead 形状畸变。
+</div>
+
+<p>正确做法：用 ∇SDF（纯几何法线，与惩罚无关）。</p>
+
+<div class="formula">
+tool_z(v) = −∇SDF(v) / |∇SDF(v)|
+<div class="formula-label">喷头朝模型内部（负号）</div>
+</div>
+
+<h3>稳定参考轴的构造</h3>
+
+<p>tool_x 应该沿"打印方向"，但路径还没生成！怎么办？用一个稳定参考轴：</p>
+
+<ol class="step-list">
+<li><div class="step-content">
+<strong>选参考向量</strong>：
+<div class="formula">
+ref = world_x  if |world_x · tool_z| < 0.9  else world_y
+</div>
+（如果 world_x 和 tool_z 几乎平行就换 world_y，避免接近 0）
+</div></li>
+
+<li><div class="step-content">
+<strong>投影到 ⊥tool_z 平面 + 归一化</strong>：
+<div class="formula">
+tool_x_ref(v) = 归一化( ref − (ref · tool_z) × tool_z )
+</div>
+</div></li>
+
+<li><div class="step-content">
+<strong>叉积补全</strong>：
+<div class="formula">
+tool_y_ref(v) = tool_z × tool_x_ref
+</div>
+</div></li>
+</ol>
+
+<h3>偏航角留作 IK 候选枚举的变量</h3>
+
+<p>tool_z 锁定，但喷头绕 tool_z 自旋的"偏航角" ψ 是自由的（任意 ψ 都对应"喷头朝向工件内部"）。第二节 2.4 在算 p_ik 时枚举 12 个 ψ 采样，每个 ψ 对应一个完整姿态。</p>
+
+<div class="why">
+<div class="why-title">为什么把 ψ 当变量，不在这里定值？</div>
+不同的 ψ 对应不同的最优 IK 解 + 不同的关节角余量。<br>
+如果在这里就定一个 ψ（如总是 0°），可能选到一个"机器人勉强能摆但很不舒服"的姿态。<br>
+枚举 12 个 ψ + 取最优，能找到"该体素附近机器人最舒服的姿态"，p_ik 才能准确反映"易加工度"。
+</div>
+
+<div class="chapter-summary">
+<h4>第六节小结</h4>
+工具姿态估计是第二节 p_ik 计算的必要前置：
+<ul>
+<li>tool_z 用 ∇SDF（不是 ∇D₀），保证朝向几何法线方向</li>
+<li>tool_x/tool_y 用稳定参考轴构造（不依赖路径切线）</li>
+<li>偏航角 ψ 留作 IK 候选枚举变量（12 个采样取最优）</li>
+</ul>
+</div>
+
+<!-- ============== 总结 ============== -->
+<h2 id="summary">总结</h2>
+
+<p>整个算法的核心是<strong>把"难加工"翻译成"边权惩罚"</strong>，让最短路径自然绕开。</p>
+
+<h3>数据流总览</h3>
+
+<svg width="900" height="450" viewBox="0 0 900 450">
+  <!-- Stage 1: 基础场 -->
+  <rect x="20" y="30" width="180" height="200" fill="#e8f0ff" stroke="#2a4a8a" stroke-width="2" rx="8"/>
+  <text x="110" y="55" text-anchor="middle" font-size="14" fill="#2a4a8a" font-weight="bold">第一阶段：基础场</text>
+  <text x="110" y="85" text-anchor="middle" font-size="11">输入: STL 网格</text>
+  <text x="40" y="115" font-size="10">• 符号距离场 SDF</text>
+  <text x="40" y="135" font-size="10">• 局部开口半径场</text>
+  <text x="40" y="155" font-size="10">• 最大主曲率场 κ_max</text>
+  <text x="40" y="175" font-size="10">• 平滑法向场 N_smooth</text>
+  <text x="40" y="210" font-size="10" fill="#888">（一次算好，缓存）</text>
+
+  <!-- Arrow 1 -->
+  <line x1="200" y1="130" x2="240" y2="130" stroke="#2a4a8a" stroke-width="2" marker-end="url(#arrow1)"/>
+
+  <!-- Stage 2 Pass 1: 几何惩罚 + D₀ -->
+  <rect x="240" y="20" width="180" height="120" fill="#fff5e0" stroke="#d4a017" stroke-width="2" rx="8"/>
+  <text x="330" y="42" text-anchor="middle" font-size="13" fill="#a07a00" font-weight="bold">Pass 1</text>
+  <text x="330" y="62" text-anchor="middle" font-size="11">几何惩罚:</text>
+  <text x="260" y="85" font-size="10">α·p_clear</text>
+  <text x="260" y="105" font-size="10">β·p_orient</text>
+  <text x="260" y="125" font-size="10">γ·p_curv</text>
+  <text x="380" y="105" font-size="11" fill="#d35400" font-weight="bold">→ D₀</text>
+
+  <!-- Arrow 2 -->
+  <line x1="330" y1="140" x2="330" y2="170" stroke="#d4a017" stroke-width="2" marker-end="url(#arrow1)"/>
+
+  <!-- Stage 2 Pass 2: 工具姿态 -->
+  <rect x="240" y="170" width="180" height="60" fill="#fff5e0" stroke="#d4a017" stroke-width="2" rx="8"/>
+  <text x="330" y="195" text-anchor="middle" font-size="13" fill="#a07a00" font-weight="bold">Pass 2</text>
+  <text x="330" y="215" text-anchor="middle" font-size="10">工具姿态 tool_z(v) = −∇SDF</text>
+
+  <!-- Arrow 3 -->
+  <line x1="330" y1="230" x2="330" y2="260" stroke="#d4a017" stroke-width="2" marker-end="url(#arrow1)"/>
+
+  <!-- Stage 2 Pass 3: IK 边际 -->
+  <rect x="240" y="260" width="180" height="80" fill="#fff5e0" stroke="#d4a017" stroke-width="2" rx="8"/>
+  <text x="330" y="285" text-anchor="middle" font-size="13" fill="#a07a00" font-weight="bold">Pass 3</text>
+  <text x="330" y="305" text-anchor="middle" font-size="10">IK 边际场 p_ik</text>
+  <text x="330" y="322" text-anchor="middle" font-size="9" fill="#888">(粗网格 + 分支一致性)</text>
+
+  <!-- Arrow 4 -->
+  <line x1="420" y1="80" x2="460" y2="80" stroke="#2a4a8a" stroke-width="2" marker-end="url(#arrow1)"/>
+  <line x1="420" y1="300" x2="460" y2="300" stroke="#2a4a8a" stroke-width="2" marker-end="url(#arrow1)"/>
+
+  <!-- Pass 4: 完整距离场 -->
+  <rect x="460" y="60" width="200" height="260" fill="#ffe8e8" stroke="#a03030" stroke-width="2" rx="8"/>
+  <text x="560" y="85" text-anchor="middle" font-size="13" fill="#a03030" font-weight="bold">Pass 4: 完整距离场</text>
+  <text x="480" y="120" font-size="11">归一化 4 项惩罚</text>
+  <text x="480" y="145" font-size="10">α·p_clear_norm</text>
+  <text x="480" y="165" font-size="10">β·p_orient_norm</text>
+  <text x="480" y="185" font-size="10">γ·p_curv_norm</text>
+  <text x="480" y="205" font-size="10">δ·p_ik_norm</text>
+  <text x="480" y="235" font-size="11">→ Dijkstra</text>
+  <text x="480" y="260" font-size="11" font-weight="bold" fill="#a03030">→ D_final_mm</text>
+  <text x="480" y="285" font-size="10">→ 有界平滑</text>
+  <text x="480" y="305" font-size="11" font-weight="bold" fill="#a03030">→ D_slice_mm</text>
+
+  <!-- Arrow 5 -->
+  <line x1="660" y1="190" x2="700" y2="190" stroke="#2a4a8a" stroke-width="2" marker-end="url(#arrow1)"/>
+
+  <!-- 第三阶段：等值面 -->
+  <rect x="700" y="120" width="180" height="140" fill="#e8f5e8" stroke="#4a7a2a" stroke-width="2" rx="8"/>
+  <text x="790" y="150" text-anchor="middle" font-size="13" fill="#4a7a2a" font-weight="bold">第三阶段</text>
+  <text x="790" y="175" text-anchor="middle" font-size="11">等值面提取 (MC)</text>
+  <text x="790" y="200" text-anchor="middle" font-size="10">每隔 layer_height_mm</text>
+  <text x="790" y="225" text-anchor="middle" font-size="11" font-weight="bold" fill="#4a7a2a">→ 弯曲层网格</text>
+
+  <defs>
+    <marker id="arrow1" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2a4a8a"/>
+    </marker>
+  </defs>
+</svg>
+
+<p class="diagram-caption">v6.2 算法第一、二阶段数据流总览</p>
+
+<h3>核心创新</h3>
+
+<p>v6.2 算法的窄但能立的创新点是：</p>
+<ol>
+<li><strong>把 KR4 R600 的逆运动学边际度</strong>（关节限位 + 奇异性 + 工作空间）注入距离场构造阶段</li>
+<li><strong>加上邻域分支一致性项</strong>，让算法不仅避开"摆不到"的位置，还避开"摆得到但摆不连贯"的位置</li>
+</ol>
+
+<p>之前文献都把逆运动学放在"层生成后做事后筛选"，本算法把它<strong>前置到层生成阶段</strong>。这一点是论文的核心 contribution。</p>
+
+<h3>诚实声明</h3>
+
+<div class="warn">
+<div class="warn-title">必须写入论文 limitations 章节</div>
+<ul>
+<li>算法提供的是<strong>软引导</strong>，不是<strong>硬约束保证</strong></li>
+<li>C1-C4 的真正满足由<strong>事后验证</strong>判定，失败区域显式上报</li>
+<li>对极端复杂几何（如毛主席原始头雕），算法可能无法找到满足所有约束的层，需要先做几何调理（重度平滑），代价是失去局部细节</li>
+</ul>
+</div>
+
+<p style="margin-top: 48px; text-align: center; color: #888; font-size: 13px;">
+— 课件结束 —<br>
+如有不懂的细节，回到目录定位对应章节细读
+</p>
+
+</body>
+</html>
