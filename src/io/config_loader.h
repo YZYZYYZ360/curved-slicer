@@ -5,6 +5,8 @@
 #include "field/poisson.h"
 #include "field/field_smoothing.h"
 #include "geometry/voxel_grid.h"
+#include "trajectory/poly5_smoother.h"
+#include "path/geodesic_paths.h"
 
 #include <array>
 #include <filesystem>
@@ -83,12 +85,17 @@ struct RobotConfig {
     std::array<double, 3> robot_ini_abc{0.0, 0.0, 0.0};
 };
 
+struct JointHomeConfig {
+    std::array<double, 6> q_deg{};
+};
+
 struct KukaConfig {
     std::array<JointAxisLimit, 6> limits{{{-170.0, 170.0, 336.0}, {-195.0, 40.0, 336.0},
         {-115.0, 150.0, 488.0}, {-185.0, 185.0, 600.0}, {-120.0, 120.0, 529.0},
         {-350.0, 350.0, 800.0}}};
     RobotConfig robot;
     ReachabilityParams reachability;
+    JointHomeConfig home;
     std::array<std::array<double, 4>, 4> world_to_base{{{{1.0, 0.0, 0.0, 0.0}},
         {{0.0, 1.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0, 0.0}}, {{0.0, 0.0, 0.0, 1.0}}}};
 };
@@ -110,7 +117,9 @@ struct PipelineConfig {
     FieldBoundaryConfig field_boundary;
     IsoSurfaceConfig iso_surface;
     PathConfig path;
+    GeodesicPathParams geodesic;
     KukaConfig kuka;
+    TrajectoryParams trajectory;
     MetricsConfig metrics;
     LoggingConfig logging;
 };

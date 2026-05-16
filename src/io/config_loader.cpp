@@ -162,6 +162,28 @@ void readDoubleArray3(const toml::table* table, std::string_view key, std::array
     }
 }
 
+void readDoubleArray6(const toml::table* table, std::string_view key, std::array<double, 6>& target)
+{
+    if (table == nullptr) {
+        return;
+    }
+    const toml::node* node = table->get(key);
+    if (node == nullptr) {
+        return;
+    }
+    const toml::array* array = node->as_array();
+    if (array == nullptr || array->size() != target.size()) {
+        throw typeError(key, "an array of 6 numbers");
+    }
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        const std::optional<double> value = nodeDouble(array->get(i));
+        if (!value) {
+            throw typeError(key, "an array of 6 numbers");
+        }
+        target[i] = *value;
+    }
+}
+
 void readIntVector(const toml::table* table, std::string_view key, std::vector<int>& target)
 {
     if (table == nullptr) {
@@ -314,6 +336,11 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDoubleArray3(boundary, "print_direction", config.field_boundary.print_direction);
     readDouble(boundary, "bottom_dot_threshold", config.field_boundary.bottom_dot_threshold);
     readDouble(boundary, "bottom_sdf_band", config.field_boundary.bottom_sdf_band);
+    // v4 §10: geometric_z 策略参数
+    readDouble(boundary, "bottom_band_mm", config.field_boundary.bottom_band_mm);
+    readDouble(boundary, "top_band_mm", config.field_boundary.top_band_mm);
+    readDouble(boundary, "band_min_mm", config.field_boundary.band_min_mm);
+    readDouble(boundary, "band_max_mm", config.field_boundary.band_max_mm);
 
     const toml::table* algorithm = tableAt(root, {"algorithm"});
     readString(algorithm, "pipeline", config.algorithm.pipeline);
@@ -383,8 +410,31 @@ PipelineConfig loadPipelineConfig(const std::filesystem::path& config_path)
     readDoubleArray3(reachability, "workpiece_up", workpiece_up);
     config.kuka.reachability.workpiece_up = {workpiece_up[0], workpiece_up[1], workpiece_up[2]};
     readDouble(reachability, "min_dot_threshold", config.kuka.reachability.min_dot_threshold);
+    readDouble(reachability, "workspace_r_min_mm", config.kuka.reachability.workspace_r_min_mm);
+    readDouble(reachability, "workspace_r_max_mm", config.kuka.reachability.workspace_r_max_mm);
+
+    const toml::table* kuka_home = tableAt(root, {"kuka", "home"});
+    if (kuka_home) {
+        readDoubleArray6(kuka_home, "q_deg", config.kuka.home.q_deg);
+    }
 
     readMatrix4x4(tableAt(root, {"kuka", "world_to_base"}), "world_to_base", config.kuka.world_to_base);
+
+    const toml::table* geodesic = tableAt(root, {"path", "geodesic"});
+    if (geodesic) {
+        readDouble(geodesic, "line_spacing_mm", config.geodesic.line_spacing_mm);
+        readDouble(geodesic, "resample_step_mm", config.geodesic.resample_step_mm);
+        readString(geodesic, "seed_strategy", config.geodesic.seed_strategy);
+    }
+
+    const toml::table* trajectory = tableAt(root, {"trajectory"});
+    if (trajectory) {
+        readDouble(trajectory, "target_line_speed_mm_per_s", config.trajectory.target_line_speed_mm_per_s);
+        readDouble(trajectory, "sample_period_ms", config.trajectory.sample_period_ms);
+        readDouble(trajectory, "max_joint_velocity_deg_per_s", config.trajectory.max_joint_velocity_deg_per_s);
+        readDouble(trajectory, "max_joint_accel_deg_per_s2", config.trajectory.max_joint_accel_deg_per_s2);
+        readDouble(trajectory, "max_joint_delta_per_cycle_deg", config.trajectory.max_joint_delta_per_cycle_deg);
+    }
 
     const toml::table* metrics = tableAt(root, {"metrics"});
     readBool(metrics, "enabled", config.metrics.enabled);

@@ -4,8 +4,15 @@
 #include "field/laplacian.h"
 #include "geometry/sdf.h"
 #include "geometry/voxel_grid.h"
+#include "kinematics/dh_params.h"
+#include "kinematics/forward_kin.h"
+#include "kinematics/ik_solver.h"
+#include "kinematics/reachability.h"
 #include "metrics/curvature.h"
+#include "path/geodesic_paths.h"
+#include "path/pose_from_path.h"
 #include "surface/iso_surface.h"
+#include "trajectory/poly5_smoother.h"
 
 #include <algorithm>
 #include <array>
@@ -780,8 +787,14 @@ void writeBcVoxelsPly(const VoxelGrid& grid,
         const double x = grid.bbox().min.x + (v.x + 0.5) * grid.spacing();
         const double y = grid.bbox().min.y + (v.y + 0.5) * grid.spacing();
         const double z = grid.bbox().min.z + (v.z + 0.5) * grid.spacing();
-        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
-        const bool is_bottom = norm(diff) < 1e-6;
+        // v4 §10: 优先用 bc_zones，回退到向量差判定
+        bool is_bottom;
+        if (!bc.bc_zones.empty()) {
+            is_bottom = (bc.bc_zones[i] == BCZone::Bottom);
+        } else {
+            const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+            is_bottom = norm(diff) < 1e-6;
+        }
         output << x << ' ' << y << ' ' << z << ' '
                << (is_bottom ? 255 : 0) << ' ' << 0 << ' ' << (is_bottom ? 0 : 255) << '\n';
     }
@@ -980,7 +993,48 @@ BatchReport runBatch(const PipelineConfig& config)
 
         try {
             const auto read_start = Clock::now();
-            const TriangleMesh mesh = readStl(model.stl_path);
+            TriangleMesh mesh = readStl(model.stl_path);
+
+            // Apply world_to_base transformation if not identity
+            {
+                bool is_identity = true;
+                for (int r = 0; r < 4; ++r)
+                    for (int c = 0; c < 4; ++c) {
+                        double expected = (r == c) ? 1.0 : 0.0;
+                        if (std::abs(config.kuka.world_to_base[r][c] - expected) > 1e-9)
+                            is_identity = false;
+                    }
+                if (!is_identity) {
+                    Eigen::Matrix4d T;
+                    for (int r = 0; r < 4; ++r)
+                        for (int c = 0; c < 4; ++c)
+                            T(r, c) = config.kuka.world_to_base[r][c];
+                    Eigen::Matrix3d R = T.block<3,3>(0,0);
+                    for (auto& tri : mesh.triangles) {
+                        for (auto& v : tri.vertices) {
+                            Eigen::Vector4d p(v.x, v.y, v.z, 1.0);
+                            Eigen::Vector4d tp = T * p;
+                            v = {tp(0), tp(1), tp(2)};
+                        }
+                        Eigen::Vector3d rn = R * Eigen::Vector3d(tri.normal.x, tri.normal.y, tri.normal.z);
+                        tri.normal = {rn.x(), rn.y(), rn.z()};
+                    }
+                    // Recompute bbox
+                    mesh.bbox.min = {1e30, 1e30, 1e30};
+                    mesh.bbox.max = {-1e30, -1e30, -1e30};
+                    for (const auto& tri : mesh.triangles) {
+                        for (const auto& v : tri.vertices) {
+                            mesh.bbox.min.x = std::min(mesh.bbox.min.x, v.x);
+                            mesh.bbox.min.y = std::min(mesh.bbox.min.y, v.y);
+                            mesh.bbox.min.z = std::min(mesh.bbox.min.z, v.z);
+                            mesh.bbox.max.x = std::max(mesh.bbox.max.x, v.x);
+                            mesh.bbox.max.y = std::max(mesh.bbox.max.y, v.y);
+                            mesh.bbox.max.z = std::max(mesh.bbox.max.z, v.z);
+                        }
+                    }
+                }
+            }
+
             const auto read_end = Clock::now();
 
             const auto voxel_start = Clock::now();
@@ -1044,21 +1098,30 @@ BatchReport runBatch(const PipelineConfig& config)
                 }
 
                 PoissonParams poisson_params = config.algorithm.field.poisson;
-                // v4 §9: 提取底面 anchor 集合
+                // v4 §9+§10: 提取底面+顶面 anchor 集合（优先 bc_zones，回退向量差）
                 const Vec3 print_dir = printDirection(config.field_boundary);
                 for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
-                    const Vec3 diff = bc.fixed_vectors[i] - print_dir;
-                    if (norm(diff) < 1e-6) {  // 是底面 BC（统一 +print_direction 那批）
+                    if (!bc.bc_zones.empty()) {
+                        // geometric_z 策略：bc_zones 明确区分底/顶
                         poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
-                        poisson_params.anchor_values.push_back(0.0);
+                        poisson_params.anchor_values.push_back(
+                            bc.bc_zones[i] == BCZone::Bottom ? 0.0 : 1.0);
+                    } else {
+                        // bottom_up 策略：向量差判定，仅底面做 anchor
+                        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+                        if (norm(diff) < 1e-6) {
+                            poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                            poisson_params.anchor_values.push_back(0.0);
+                        }
                     }
                 }
                 poisson_params.log_iterations = true;
                 poisson_params.progress_label = report.name;
                 std::cout << "[" << report.name << "] solvePoisson begin (anchor_count="
                           << poisson_params.anchor_voxels.size() << ")\n" << std::flush;
+                std::cout << "[" << report.name << "] solvePoisson begin (anchor_count="
+                          << poisson_params.anchor_voxels.size() << ")\n" << std::flush;
                 phi = solvePoisson(grid, *poisson_input, poisson_params);
-                std::cout << "[" << report.name << "] solvePoisson done\n" << std::flush;
                 gauge_diagnostics = gaugeShiftPhi(phi, grid, sdf, config.field_boundary,
                                                     !poisson_params.anchor_voxels.empty());
                 has_gauge_diagnostics = true;
@@ -1076,8 +1139,86 @@ BatchReport runBatch(const PipelineConfig& config)
                     writeGFieldPly(grid, clamped, dump_dir / "g_field.ply");
                     std::cout << "[" << report.name << "] dumping done\n" << std::flush;
                 }
+            } else if (report.pipeline == "vector_kuka_v4") {
+                // v4 pipeline: same field computation as vector_kuka, then
+                // geodesic paths → IK → trajectory smoothing → CSV output
+
+                const auto laplacian_start = Clock::now();
+                const LaplacianVectorBC bc = generateVectorBC(grid, sdf, config.field_boundary);
+                LaplacianParams laplacian_params = config.algorithm.field.laplacian;
+                const VectorField vector_field = solveLaplacianVector(grid, bc, laplacian_params);
+                const auto laplacian_end = Clock::now();
+                laplacian_ms = elapsedMs(laplacian_start, laplacian_end);
+
+                const auto poisson_start = Clock::now();
+                const VectorField clamped = projectToHemisphere(grid, vector_field, config.kuka.reachability);
+                report.m2_hemisphere_violation_ratio =
+                    hemisphereViolationRatio(grid, clamped, config.kuka.reachability);
+
+                const VectorField* poisson_input = &clamped;
+                VectorField smoothed_field;
+                if (config.algorithm.field.smoothing.passes > 0) {
+                    smoothed_field = smoothVectorField(grid, clamped, bc,
+                                                       config.algorithm.field.smoothing);
+                    poisson_input = &smoothed_field;
+                }
+
+                PoissonParams poisson_params = config.algorithm.field.poisson;
+                const Vec3 print_dir = printDirection(config.field_boundary);
+                for (std::size_t i = 0; i < bc.fixed_indices.size(); ++i) {
+                    if (!bc.bc_zones.empty()) {
+                        poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                        poisson_params.anchor_values.push_back(
+                            bc.bc_zones[i] == BCZone::Bottom ? 0.0 : 1.0);
+                    } else {
+                        const Vec3 diff = bc.fixed_vectors[i] - print_dir;
+                        if (norm(diff) < 1e-6) {
+                            poisson_params.anchor_voxels.push_back(bc.fixed_indices[i]);
+                            poisson_params.anchor_values.push_back(0.0);
+                        }
+                    }
+                }
+                poisson_params.log_iterations = true;
+                poisson_params.progress_label = report.name;
+
+
+                phi = solvePoisson(grid, *poisson_input, poisson_params);
+
+                // Normalize phi to [0, 1] for iso-surface extraction
+                // The Poisson solver may produce values outside [0,1] due to
+                // strong divergence in the vector field.
+                double phi_min = 1e30, phi_max_v = -1e30;
+                for (double v : phi.values) {
+                    if (!std::isfinite(v)) continue;
+                    phi_min = std::min(phi_min, v);
+                    phi_max_v = std::max(phi_max_v, v);
+                }
+                double phi_range = phi_max_v - phi_min;
+                if (phi_range > 1e-12) {
+                    for (double& v : phi.values) {
+                        if (std::isfinite(v)) {
+                            v = (v - phi_min) / phi_range;
+                        }
+                    }
+                }
+                has_gauge_diagnostics = false;
+
+                // Dump intermediate fields for v4
+                if (config.io.debug_dump_intermediates) {
+                    const std::filesystem::path dump_dir = config.io.output_root / model.name;
+                    std::filesystem::create_directories(dump_dir);
+                    writeVoxelOccupiedPly(grid, dump_dir / "voxel_occupied.ply");
+                    writeSdfPointsPly(grid, sdf, dump_dir / "sdf_points.ply");
+                    writeBcVoxelsPly(grid, bc, print_dir, dump_dir / "bc_voxels.ply");
+                    writeGFieldPly(grid, clamped, dump_dir / "g_field.ply");
+                }
+
+                const auto poisson_end = Clock::now();
+                poisson_ms = elapsedMs(poisson_start, poisson_end);
+                phi_is_normalized = false;
+                std::cout << "[" << report.name << "] vector_kuka_v4 field computation done\n" << std::flush;
             } else {
-                throw std::runtime_error("algorithm.pipeline must be scalar or vector_kuka");
+                throw std::runtime_error("algorithm.pipeline must be scalar, vector_kuka, or vector_kuka_v4");
             }
 
             validatePhi(phi);
@@ -1090,6 +1231,7 @@ BatchReport runBatch(const PipelineConfig& config)
             }
 
             const auto iso_start = Clock::now();
+            std::cout << "[" << report.name << "] iso_surface extraction begin\n" << std::flush;
             const std::vector<double> levels = planIsoLevels(
                 phi,
                 isoParamsFromConfig(config.iso_surface, config.field_boundary, phi.bbox, phi_is_normalized));
@@ -1126,6 +1268,267 @@ BatchReport runBatch(const PipelineConfig& config)
                 &report.component_details,
                 &report.component_summary);
             const auto iso_end = Clock::now();
+            std::cout << "[" << report.name << "] iso_surface done: "
+                      << layer_meshes.size() << " layers\n" << std::flush;
+
+            // v4 trajectory generation (§14 + §17.5)
+            if (report.pipeline == "vector_kuka_v4") {
+                const auto traj_start = Clock::now();
+                std::cout << "[" << report.name << "] trajectory generation begin\n" << std::flush;
+
+                KR4DHParams dh;
+                for (int i = 0; i < 6; ++i) {
+                    dh.qlim_deg[i][0] = config.kuka.limits[i].min_deg;
+                    dh.qlim_deg[i][1] = config.kuka.limits[i].max_deg;
+                }
+                dh.tool_z_mm = config.kuka.robot.z_offset;
+
+                JointConfig home;
+                home.q_deg = config.kuka.home.q_deg;
+
+                const Vec3 G_dir = normalized(config.kuka.reachability.workpiece_up);
+
+                // Collect all PathPointWithJoints across layers, splitting at NaN
+                std::vector<std::vector<PathPointWithJoints>> segments;
+                segments.emplace_back();
+
+                int layers_processed = 0;
+                int layers_skipped_large = 0;
+                int layers_geodesic_error = 0;
+                int total_polylines = 0;
+                int total_reachable = 0;
+                int total_unreachable = 0;
+
+                for (const auto& iso_mesh : layer_meshes) {
+                    if (iso_mesh.vertices.empty() || iso_mesh.triangles.empty()) continue;
+
+                    // Skip very large meshes to avoid stack/timeout issues
+                    if (iso_mesh.vertices.size() > 10000) {
+                        ++layers_skipped_large;
+                        continue;
+                    }
+                    ++layers_processed;
+
+                    // Convert IsoMesh to Eigen matrices for geodesic paths
+                    const int nv = static_cast<int>(iso_mesh.vertices.size());
+                    const int nf = static_cast<int>(iso_mesh.triangles.size());
+                    Eigen::MatrixXd V(nv, 3);
+                    for (int i = 0; i < nv; ++i) {
+                        V(i, 0) = iso_mesh.vertices[i].x;
+                        V(i, 1) = iso_mesh.vertices[i].y;
+                        V(i, 2) = iso_mesh.vertices[i].z;
+                    }
+                    Eigen::MatrixXi F(nf, 3);
+                    for (int i = 0; i < nf; ++i) {
+                        F(i, 0) = static_cast<int>(iso_mesh.triangles[i].v0);
+                        F(i, 1) = static_cast<int>(iso_mesh.triangles[i].v1);
+                        F(i, 2) = static_cast<int>(iso_mesh.triangles[i].v2);
+                    }
+
+                    std::vector<PathPolyline> geodesic_paths;
+                    try {
+                        geodesic_paths = generateGeodesicPaths(V, F, config.geodesic);
+                    } catch (const std::exception& e) {
+                        ++layers_geodesic_error;
+                        continue;
+                    }
+                    total_polylines += static_cast<int>(geodesic_paths.size());
+
+                    // Dump geodesic paths as PLY line set
+                    if (config.io.debug_dump_intermediates && !geodesic_paths.empty()) {
+                        std::ostringstream ply_name;
+                        ply_name << "geodesic_" << std::setfill('0') << std::setw(3) << iso_mesh.layer_id << ".ply";
+                        std::ofstream ply(model_dir / ply_name.str());
+                        int total_verts = 0, total_edges = 0;
+                        for (auto& p : geodesic_paths) {
+                            total_verts += static_cast<int>(p.points.size());
+                            total_edges += static_cast<int>(p.points.size()) - 1;
+                            if (p.is_closed) total_edges += 1;
+                        }
+                        ply << "ply\nformat ascii 1.0\nelement vertex " << total_verts
+                            << "\nproperty float x\nproperty float y\nproperty float z"
+                            << "\nelement edge " << total_edges
+                            << "\nproperty int vertex1\nproperty int vertex2\nend_header\n";
+                        int v_offset = 0;
+                        for (auto& p : geodesic_paths) {
+                            for (auto& pt : p.points) {
+                                ply << pt.x() << " " << pt.y() << " " << pt.z() << "\n";
+                            }
+                            for (size_t ei = 1; ei < p.points.size(); ++ei) {
+                                ply << (v_offset + ei - 1) << " " << (v_offset + ei) << "\n";
+                            }
+                            if (p.is_closed && p.points.size() > 2) {
+                                ply << (v_offset + p.points.size() - 1) << " " << v_offset << "\n";
+                            }
+                            v_offset += static_cast<int>(p.points.size());
+                        }
+                        ply.close();
+                    }
+
+                    // Precompute per-vertex normals from triangle faces
+                    std::vector<Eigen::Vector3d> vertex_normals(nv, Eigen::Vector3d::Zero());
+                    for (int fi = 0; fi < nf; ++fi) {
+                        int i0 = F(fi, 0), i1 = F(fi, 1), i2 = F(fi, 2);
+                        Eigen::Vector3d e1 = V.row(i1) - V.row(i0);
+                        Eigen::Vector3d e2 = V.row(i2) - V.row(i0);
+                        Eigen::Vector3d n = e1.cross(e2);
+                        vertex_normals[i0] += n;
+                        vertex_normals[i1] += n;
+                        vertex_normals[i2] += n;
+                    }
+                    for (auto& n : vertex_normals) {
+                        double len = n.norm();
+                        if (len > 1e-12) n /= len;
+                        else n = Eigen::Vector3d(0, 0, 1);
+                    }
+
+                    // Helper: find closest vertex in mesh to a point
+                    auto findClosestVertex = [&](const Eigen::Vector3d& p) -> int {
+                        int best = 0;
+                        double best_d2 = 1e30;
+                        for (int i = 0; i < nv; ++i) {
+                            double d2 = (V.row(i).transpose() - p).squaredNorm();
+                            if (d2 < best_d2) { best_d2 = d2; best = i; }
+                        }
+                        return best;
+                    };
+
+                    for (const auto& poly : geodesic_paths) {
+                        if (poly.points.size() < 2) continue;
+
+                        // Build per-point arrays with per-point surface normals
+                        std::vector<Vec3> pts, tans, normals;
+                        pts.reserve(poly.points.size());
+                        tans.reserve(poly.tangents.size());
+                        normals.reserve(poly.points.size());
+                        for (size_t pi = 0; pi < poly.points.size(); ++pi) {
+                            const auto& p = poly.points[pi];
+                            pts.push_back({p.x(), p.y(), p.z()});
+                            if (pi < poly.tangents.size()) {
+                                const auto& t = poly.tangents[pi];
+                                tans.push_back({t.x(), t.y(), t.z()});
+                            }
+                            // Get surface normal from closest mesh vertex
+                            int closest = findClosestVertex(p);
+                            normals.push_back({vertex_normals[closest].x(),
+                                               vertex_normals[closest].y(),
+                                               vertex_normals[closest].z()});
+                        }
+
+                        // IK with per-point normals: use normals as G_direction
+                        // For each point, construct tool frame from tangent + normal
+                        PathReachabilityResult reach_result;
+                        reach_result.statuses.resize(pts.size(), ReachStatus::NoSolution);
+                        reach_result.solutions.resize(pts.size());
+                        JointConfig reference = home;
+
+                        for (size_t pi = 0; pi < pts.size(); ++pi) {
+                            Eigen::Vector3d pt(pts[pi].x, pts[pi].y, pts[pi].z);
+                            Eigen::Vector3d tan_eig(tans[pi].x, tans[pi].y, tans[pi].z);
+                            Eigen::Vector3d norm_eig(normals[pi].x, normals[pi].y, normals[pi].z);
+
+                            Eigen::Matrix3d R_tool = constructToolFrame(tan_eig, norm_eig);
+                            CartPose pose = toolFrameToCartPose(pt, R_tool);
+
+                            auto result = checkReachability(pose, reference, dh, config.kuka.reachability);
+                            reach_result.statuses[pi] = result.status;
+                            if (result.status == ReachStatus::OK) {
+                                reach_result.solutions[pi] = result.solution;
+                                reference = result.solution;
+                                ++reach_result.num_reachable;
+                            }
+                        }
+
+                        // Assemble PathPointWithJoints, split at unreachable points
+                        for (size_t i = 0; i < pts.size(); ++i) {
+                            if (reach_result.statuses[i] == ReachStatus::OK) {
+                                ++total_reachable;
+                                PathPointWithJoints pp;
+                                pp.cart_pos = poly.points[i];
+                                pp.joint = reach_result.solutions[i];
+                                pp.wire_on = true;
+                                segments.back().push_back(pp);
+                            } else {
+                                ++total_unreachable;
+                                // NaN: start new segment
+                                if (segments.back().size() > 1) {
+                                    segments.emplace_back();
+                                } else if (!segments.back().empty()) {
+                                    segments.back().clear();
+                                }
+                            }
+                        }
+                        // Start new segment between polylines
+                        if (segments.back().size() > 1) {
+                            segments.emplace_back();
+                        } else if (!segments.back().empty()) {
+                            segments.back().clear();
+                        }
+                    }
+                }
+
+                std::cout << "[" << report.name << "] trajectory stats: "
+                          << layers_processed << " layers, "
+                          << total_polylines << " polylines, "
+                          << total_reachable << " reachable, "
+                          << total_unreachable << " unreachable\n" << std::flush;
+
+                // Remove empty segments
+                segments.erase(
+                    std::remove_if(segments.begin(), segments.end(),
+                                   [](const auto& s) { return s.size() < 2; }),
+                    segments.end());
+
+                // Smooth each segment and write trajectory.csv
+                const std::filesystem::path traj_path = model_dir / "trajectory.csv";
+                std::ofstream csv(traj_path);
+                csv << "timestamp_ms,segment_id,A1,A2,A3,A4,A5,A6,wire_on\n";
+
+                int total_traj_points = 0;
+                int segment_id = 0;
+                for (const auto& seg : segments) {
+                    ++segment_id;
+                    auto traj = smoothTrajectoryPoly5(seg, config.trajectory);
+                    for (const auto& pt : traj) {
+                        csv << std::fixed << std::setprecision(6)
+                            << pt.timestamp_ms << "," << segment_id << ","
+                            << pt.joint_deg[0] << "," << pt.joint_deg[1] << ","
+                            << pt.joint_deg[2] << "," << pt.joint_deg[3] << ","
+                            << pt.joint_deg[4] << "," << pt.joint_deg[5] << ","
+                            << (pt.wire_on ? 1 : 0) << "\n";
+                        ++total_traj_points;
+                    }
+                }
+                csv.close();
+
+                // Dump reachable path points as PLY point cloud
+                if (config.io.debug_dump_intermediates) {
+                    int total_pts = 0;
+                    for (auto& seg : segments) total_pts += static_cast<int>(seg.size());
+                    if (total_pts > 0) {
+                        std::ofstream ply(model_dir / "trajectory_points.ply");
+                        ply << "ply\nformat ascii 1.0\nelement vertex " << total_pts
+                            << "\nproperty float x\nproperty float y\nproperty float z"
+                            << "\nproperty int segment_id\nend_header\n";
+                        int seg_id = 0;
+                        for (auto& seg : segments) {
+                            ++seg_id;
+                            for (auto& pp : seg) {
+                                ply << pp.cart_pos.x() << " " << pp.cart_pos.y()
+                                    << " " << pp.cart_pos.z() << " " << seg_id << "\n";
+                            }
+                        }
+                        ply.close();
+                    }
+                }
+
+                const auto traj_end = Clock::now();
+                std::cout << "[" << report.name << "] trajectory done: "
+                          << total_traj_points << " points, "
+                          << segment_id << " segments, "
+                          << std::fixed << std::setprecision(1)
+                          << elapsedMs(traj_start, traj_end) << "ms\n" << std::flush;
+            }
 
             report.success = true;
             report.message = "ok";
@@ -1233,7 +1636,7 @@ void printBatchReport(const BatchReport& report, std::ostream& output)
                        << " phi_min=" << model.phi_min
                        << " phi_max=" << model.phi_max
                        << '\n';
-                if (model.pipeline == "vector_kuka") {
+                if (model.pipeline == "vector_kuka" || model.pipeline == "vector_kuka_v4") {
                     output << "  phi_diagnostic min_voxel=(" << model.phi_min_voxel.x << ','
                            << model.phi_min_voxel.y << ',' << model.phi_min_voxel.z << ")"
                            << " min_point=(" << model.phi_min_point.x << ','
