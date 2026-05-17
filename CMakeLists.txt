@@ -70,6 +70,8 @@ add_library(curved_slicer_phase0
     src/io/robot_writer.cpp
     src/io/config_loader.cpp
     src/io/TimeParameterization.cpp
+    src/io/TrajectoryCSVWriter.cpp
+    src/io/KRLWriter.cpp
     src/geometry/voxel_grid.cpp
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
@@ -373,3 +375,21 @@ configure_phase0_test(test_time_param_v4_mode)
 target_link_libraries(test_time_param_v4_mode PRIVATE Eigen3::Eigen)
 
 add_test(NAME test_time_param_v4_mode COMMAND test_time_param_v4_mode)
+
+add_executable(test_csv_writer_schema
+    tests/test_csv_writer_schema.cpp
+)
+
+configure_phase0_test(test_csv_writer_schema)
+
+add_test(NAME test_csv_writer_schema COMMAND test_csv_writer_schema)
+
+add_executable(test_krl_writer_minimal
+    tests/test_krl_writer_minimal.cpp
+)
+
+configure_phase0_test(test_krl_writer_minimal)
+
+target_link_libraries(test_krl_writer_minimal PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_krl_writer_minimal COMMAND test_krl_writer_minimal)
