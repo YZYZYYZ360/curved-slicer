@@ -72,6 +72,7 @@ add_library(curved_slicer_phase0
     src/io/TimeParameterization.cpp
     src/io/TrajectoryCSVWriter.cpp
     src/io/KRLWriter.cpp
+    src/mesh/MeshRepair.cpp
     src/geometry/voxel_grid.cpp
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
@@ -393,3 +394,13 @@ configure_phase0_test(test_krl_writer_minimal)
 target_link_libraries(test_krl_writer_minimal PRIVATE Eigen3::Eigen)
 
 add_test(NAME test_krl_writer_minimal COMMAND test_krl_writer_minimal)
+
+add_executable(test_mesh_repair
+    tests/test_mesh_repair.cpp
+)
+
+configure_phase0_test(test_mesh_repair)
+
+target_link_libraries(test_mesh_repair PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_mesh_repair COMMAND test_mesh_repair)
