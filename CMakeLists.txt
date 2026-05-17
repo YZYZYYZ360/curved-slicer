@@ -73,6 +73,7 @@ add_library(curved_slicer_phase0
     src/io/TrajectoryCSVWriter.cpp
     src/io/KRLWriter.cpp
     src/mesh/MeshRepair.cpp
+    src/voxel/VoxelizationV6.cpp
     src/geometry/voxel_grid.cpp
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
@@ -404,3 +405,13 @@ configure_phase0_test(test_mesh_repair)
 target_link_libraries(test_mesh_repair PRIVATE Eigen3::Eigen)
 
 add_test(NAME test_mesh_repair COMMAND test_mesh_repair)
+
+add_executable(test_voxelization_v6
+    tests/test_voxelization_v6.cpp
+)
+
+configure_phase0_test(test_voxelization_v6)
+
+target_link_libraries(test_voxelization_v6 PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_voxelization_v6 COMMAND test_voxelization_v6)
