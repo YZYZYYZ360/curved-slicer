@@ -79,6 +79,9 @@ add_library(curved_slicer_phase0
     src/kinematics/forward_kin.cpp
     src/kinematics/ik_solver.cpp
     src/kinematics/reachability.cpp
+    src/kinematics/KR4Model.cpp
+    src/kinematics/AnalyticIK.cpp
+    src/kinematics/Jacobian.cpp
     src/path/pose_from_path.cpp
     src/path/geodesic_paths.cpp
     src/path/path_postprocessing.cpp
@@ -328,3 +331,23 @@ target_link_libraries(v4_pipeline_e2e_test PRIVATE Eigen3::Eigen)
 add_test(NAME v4_pipeline_e2e COMMAND v4_pipeline_e2e_test)
 
 set_tests_properties(v4_pipeline_e2e PROPERTIES TIMEOUT 1800)
+
+add_executable(test_kr4_roundtrip
+    tests/test_kr4_roundtrip.cpp
+)
+
+configure_phase0_test(test_kr4_roundtrip)
+
+target_link_libraries(test_kr4_roundtrip PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_kr4_roundtrip COMMAND test_kr4_roundtrip)
+
+add_executable(test_jacobian_svd
+    tests/test_jacobian_svd.cpp
+)
+
+configure_phase0_test(test_jacobian_svd)
+
+target_link_libraries(test_jacobian_svd PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_jacobian_svd COMMAND test_jacobian_svd)
