@@ -84,6 +84,7 @@ add_library(curved_slicer_phase0
     src/kinematics/Jacobian.cpp
     src/path/pose_from_path.cpp
     src/path/geodesic_paths.cpp
+    src/path/GeodesicContourPath.cpp
     src/path/path_postprocessing.cpp
     src/trajectory/poly5_smoother.cpp
     src/metrics/curvature.cpp
@@ -351,3 +352,13 @@ configure_phase0_test(test_jacobian_svd)
 target_link_libraries(test_jacobian_svd PRIVATE Eigen3::Eigen)
 
 add_test(NAME test_jacobian_svd COMMAND test_jacobian_svd)
+
+add_executable(test_geodesic_contour
+    tests/test_geodesic_contour.cpp
+)
+
+configure_phase0_test(test_geodesic_contour)
+
+target_link_libraries(test_geodesic_contour PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_geodesic_contour COMMAND test_geodesic_contour)
