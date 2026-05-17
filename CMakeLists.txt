@@ -69,6 +69,7 @@ add_library(curved_slicer_phase0
     src/io/stl_reader.cpp
     src/io/robot_writer.cpp
     src/io/config_loader.cpp
+    src/io/TimeParameterization.cpp
     src/geometry/voxel_grid.cpp
     src/geometry/bvh.cpp
     src/geometry/sdf.cpp
@@ -362,3 +363,13 @@ configure_phase0_test(test_geodesic_contour)
 target_link_libraries(test_geodesic_contour PRIVATE Eigen3::Eigen)
 
 add_test(NAME test_geodesic_contour COMMAND test_geodesic_contour)
+
+add_executable(test_time_param_v4_mode
+    tests/test_time_param_v4_mode.cpp
+)
+
+configure_phase0_test(test_time_param_v4_mode)
+
+target_link_libraries(test_time_param_v4_mode PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_time_param_v4_mode COMMAND test_time_param_v4_mode)
