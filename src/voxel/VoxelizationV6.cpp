@@ -269,6 +269,11 @@ VoxelizationV6::Grid VoxelizationV6::voxelize(
 {
     validateInput(V_repaired, F_repaired);
 
+#ifdef _OPENMP
+    // memory-bandwidth bound; logical threads beyond physical cores hurt.
+    omp_set_num_threads(std::min(omp_get_max_threads(), 24));
+#endif
+
     Grid grid = makeEmptyGrid(V_repaired, opt.spacing_mm, opt.bbox_padding_mm);
     if (opt.inside_test == Options::InsideTest::WINDING_NUMBER) {
         classifyByWindingNumber(V_repaired, F_repaired, grid);
