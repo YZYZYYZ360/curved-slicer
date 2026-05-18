@@ -5,6 +5,8 @@
 
 #include <igl/winding_number.h>
 
+#include <omp.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -92,7 +94,11 @@ void classifyByWindingNumber(
     VoxelizationV6::Grid& grid)
 {
     const int total = static_cast<int>(grid.occupancy.size());
-    for (int offset = 0; offset < total; offset += kWindingChunkSize) {
+    const int n_chunks = (total + kWindingChunkSize - 1) / kWindingChunkSize;
+
+#pragma omp parallel for schedule(static)
+    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+        const int offset = chunk * kWindingChunkSize;
         const int count = std::min(kWindingChunkSize, total - offset);
         Eigen::MatrixXd centers(count, 3);
 
@@ -196,31 +202,49 @@ bool usesNeighborOffset(
 
 void markBoundary(VoxelizationV6::Grid& grid, VoxelizationV6::BoundaryConn conn)
 {
-    std::vector<int> boundary_indices;
-    boundary_indices.reserve(grid.occupancy.size() / 8U);
+    const int total = static_cast<int>(grid.occupancy.size());
+    std::vector<std::vector<int>> tls_boundary(static_cast<size_t>(omp_get_max_threads()));
 
-    for (int k = 0; k < grid.dims.z(); ++k) {
-        for (int j = 0; j < grid.dims.y(); ++j) {
-            for (int i = 0; i < grid.dims.x(); ++i) {
-                const int flat = grid.idx(i, j, k);
-                if (grid.occupancy[static_cast<size_t>(flat)] !=
-                    VoxelizationV6::Occ::INSIDE) {
-                    continue;
-                }
+#pragma omp parallel
+    {
+        const int tid = omp_get_thread_num();
+        std::vector<int>& local = tls_boundary[static_cast<size_t>(tid)];
+        local.reserve(grid.occupancy.size() / (8U * static_cast<size_t>(omp_get_max_threads())));
 
-                bool touches_outside = false;
-                for (int dk = -1; dk <= 1 && !touches_outside; ++dk) {
-                    for (int dj = -1; dj <= 1 && !touches_outside; ++dj) {
-                        for (int di = -1; di <= 1 && !touches_outside; ++di) {
-                            if (!usesNeighborOffset(di, dj, dk, conn)) continue;
-                            touches_outside = isOutsideNeighbor(grid, i + di, j + dj, k + dk);
-                        }
+#pragma omp for schedule(static) nowait
+        for (int flat = 0; flat < total; ++flat) {
+            if (grid.occupancy[static_cast<size_t>(flat)] != VoxelizationV6::Occ::INSIDE) {
+                continue;
+            }
+
+            const int nx = grid.dims.x();
+            const int ny = grid.dims.y();
+            const int i = flat % nx;
+            const int yz = flat / nx;
+            const int j = yz % ny;
+            const int k = yz / ny;
+
+            bool touches_outside = false;
+            for (int dk = -1; dk <= 1 && !touches_outside; ++dk) {
+                for (int dj = -1; dj <= 1 && !touches_outside; ++dj) {
+                    for (int di = -1; di <= 1 && !touches_outside; ++di) {
+                        if (!usesNeighborOffset(di, dj, dk, conn)) continue;
+                        touches_outside = isOutsideNeighbor(grid, i + di, j + dj, k + dk);
                     }
                 }
-
-                if (touches_outside) boundary_indices.push_back(flat);
             }
+
+            if (touches_outside) local.push_back(flat);
         }
+    }
+
+    size_t n_boundary = 0;
+    for (const auto& local : tls_boundary) n_boundary += local.size();
+
+    std::vector<int> boundary_indices;
+    boundary_indices.reserve(n_boundary);
+    for (const auto& local : tls_boundary) {
+        boundary_indices.insert(boundary_indices.end(), local.begin(), local.end());
     }
 
     grid.boundary_voxels.reserve(boundary_indices.size());

@@ -63,6 +63,8 @@ set(LIBIGL_XML OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(libigl)
 
+find_package(OpenMP REQUIRED)
+
 set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 
 add_library(curved_slicer_phase0
@@ -108,6 +110,7 @@ target_link_libraries(curved_slicer_phase0
         igl::core
     PUBLIC
         Eigen3::Eigen
+        OpenMP::OpenMP_CXX
 )
 
 if(WIN32)
