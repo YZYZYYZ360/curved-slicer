@@ -93,6 +93,7 @@ add_library(curved_slicer_phase0
     src/path/pose_from_path.cpp
     src/path/geodesic_paths.cpp
     src/path/GeodesicContourPath.cpp
+    src/path/WeightedDijkstraV6.cpp
     src/path/path_postprocessing.cpp
     src/trajectory/poly5_smoother.cpp
     src/metrics/curvature.cpp
@@ -429,3 +430,13 @@ configure_phase0_test(test_sdf_v6)
 target_link_libraries(test_sdf_v6 PRIVATE Eigen3::Eigen)
 
 add_test(NAME test_sdf_v6 COMMAND test_sdf_v6)
+
+add_executable(test_weighted_dijkstra_v6
+    tests/test_weighted_dijkstra_v6.cpp
+)
+
+configure_phase0_test(test_weighted_dijkstra_v6)
+
+target_link_libraries(test_weighted_dijkstra_v6 PRIVATE Eigen3::Eigen)
+
+add_test(NAME test_weighted_dijkstra_v6 COMMAND test_weighted_dijkstra_v6)
